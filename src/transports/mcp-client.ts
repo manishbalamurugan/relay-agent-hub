@@ -11,6 +11,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { wrapUntrusted } from "../envelope.js";
 import type { AgentRecord, Envelope, Transport, TransportReply } from "../types.js";
 
 const DEFAULT_TOOL = "relay.receive";
@@ -60,10 +61,12 @@ const mcpClientTransport: Transport = {
       await client.connect(transport, { signal: controller.signal, timeout: timeoutMs });
       const tool = (agent.config?.tool as string | undefined) ?? DEFAULT_TOOL;
       const mode = (agent.config?.mode as string | undefined) ?? "envelope";
+      // "flat" targets another Relay hub, which re-sanitises and wraps the note itself.
+      // "envelope" targets a model-facing agent, so the note leaves already wrapped as untrusted.
       const args =
         mode === "flat"
           ? { from: envelope.from, to: envelope.to, verb: envelope.verb, args: envelope.args, note: envelope.note_untrusted, corr: envelope.corr, kind: envelope.kind, expires: envelope.expires }
-          : { envelope: { ...envelope, note: envelope.note_untrusted } };
+          : { envelope: { ...envelope, note_untrusted: undefined, note: wrapUntrusted(envelope.note_untrusted) } };
       const result = await client.callTool({ name: tool, arguments: args }, undefined, { signal: controller.signal, timeout: timeoutMs });
       if ((result as { isError?: boolean }).isError) {
         const text = ((result as { content?: Array<{ text?: string }> }).content ?? []).map(c => c.text).join("\n");
