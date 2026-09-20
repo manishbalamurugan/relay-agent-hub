@@ -1,0 +1,32 @@
+{
+  "name": "relay-agent-hub",
+  "version": "0.1.0",
+  "description": "Relay — a pluggable agent-interop MCP hub (streamable HTTP)",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "tsx test/e2e.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "express": "^5.2.1",
+    "nanoid": "^6.0.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

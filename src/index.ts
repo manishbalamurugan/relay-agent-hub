@@ -1,0 +1,220 @@
+/**
+ * Relay — HTTP surface and boot.
+ *
+ * Public (no auth):   GET /health   GET /openapi.json   GET /connect   GET /invite
+ * Bearer-protected:   POST|GET|DELETE /mcp   POST /tools/<tool>   GET|POST|DELETE /agents
+ */
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import express from "express";
+import type { NextFunction, Request, Response } from "express";
+import { callerAgent, requireBearer } from "./auth.js";
+import { baseUrl, config } from "./config.js";
+import { handleMcp, sessionCount } from "./mcp.js";
+import { buildOpenApi } from "./openapi.js";
+import { loadVerbs, verbNames } from "./registry.js";
+import { store } from "./store.js";
+import { buildTools, runTool } from "./tools.js";
+import { loadTransports } from "./transports/index.js";
+import { RelayError } from "./types.js";
+import type { AgentRecord } from "./types.js";
+import { normaliseHandle } from "./dispatcher.js";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.resolve(here, "..", "public");
+const startedAt = Date.now();
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
+}
+
+async function renderTemplate(file: string, vars: Record<string, string>): Promise<string> {
+  let html = await fs.readFile(path.join(publicDir, file), "utf8");
+  for (const [k, v] of Object.entries(vars)) html = html.replaceAll(`{{${k}}}`, escapeHtml(v));
+  return html;
+}
+
+function sendError(res: Response, err: unknown): void {
+  if (err instanceof RelayError) {
+    res.status(err.status).json(err.toJSON());
+    return;
+  }
+  console.error("[http] unhandled error:", err);
+  res.status(500).json({ status: 500, error: (err as Error).message ?? "internal error" });
+}
+
+export function createApp() {
+  const app = express();
+  app.disable("x-powered-by");
+  app.set("trust proxy", true);
+  app.use(express.json({ limit: "1mb" }));
+  app.use((req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    next();
+  });
+
+  // ---- public ------------------------------------------------------------------------------
+  app.get("/", (_req, res) => res.redirect("/connect"));
+
+  app.get("/health", (_req, res) => {
+    res.json({ ok: true, verbs: verbNames(), version: "0.1.0", uptime_s: Math.round((Date.now() - startedAt) / 1000), sessions: sessionCount(), public_url: baseUrl() });
+  });
+
+  app.get("/openapi.json", (_req, res) => {
+    res.json(buildOpenApi());
+  });
+
+  app.get("/connect", async (_req, res, next) => {
+    try {
+      const html = await renderTemplate("connect.html", {
+        BASE_URL: baseUrl(),
+        MCP_URL: `${baseUrl()}/mcp`,
+        OWNER: store.snapshot.owner.handle,
+        VERBS: verbNames().join(", "),
+        TOKEN_NOTE: config.tokenWasGenerated ? "(the server generated a temporary token at boot — set RELAY_TOKEN to pin one)" : ""
+      });
+      res.type("html").send(html);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/invite", async (req, res, next) => {
+    try {
+      const handle = normaliseHandle(String(req.query.h ?? "").slice(0, 120) || "@friend");
+      const html = await renderTemplate("invite.html", { BASE_URL: baseUrl(), MCP_URL: `${baseUrl()}/mcp`, OWNER: store.snapshot.owner.handle, HANDLE: handle, REPO_URL: config.repoUrl });
+      res.type("html").send(html);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---- bearer-protected --------------------------------------------------------------------
+  app.all("/mcp", requireBearer, async (req, res, next) => {
+    try {
+      // Be forgiving to minimal clients: the SDK insists on both media types in Accept.
+      const accept = req.headers.accept ?? "";
+      if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
+        req.headers.accept = "application/json, text/event-stream";
+      }
+      await handleMcp(req, res, { agent: callerAgent(req) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/tools/:name", requireBearer, async (req, res, next) => {
+    try {
+      const result = await runTool(String(req.params.name), req.body ?? {}, { agent: callerAgent(req) });
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Register / update how an agent can be reached. Owner agents: handle = OWNER_HANDLE.
+  app.get("/agents", requireBearer, (_req, res) => {
+    const d = store.snapshot;
+    const redact = (a: AgentRecord) => ({ ...a, token: a.token ? "***" : undefined });
+    res.json({ owner: { ...d.owner, agents: d.owner.agents.map(redact) }, peers: d.peers.map(p => ({ ...p, agents: p.agents.map(redact) })) });
+  });
+
+  app.post("/agents", requireBearer, async (req, res, next) => {
+    try {
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const handle = normaliseHandle(String(b.handle ?? store.snapshot.owner.handle));
+      const name = String(b.agent ?? "").trim();
+      if (!name) throw new RelayError(400, "agent (name) is required");
+      if (b.endpoint_url !== undefined && b.endpoint_url !== null && !/^https?:\/\//i.test(String(b.endpoint_url))) {
+        throw new RelayError(400, "endpoint_url must be http(s)");
+      }
+      const record = await store.mutate(d => {
+        let principal = handle === d.owner.handle ? d.owner : d.peers.find(p => p.handle === handle);
+        if (!principal) {
+          principal = { handle, agents: [], connected_at: new Date().toISOString() };
+          d.peers.push(principal);
+        }
+        if (typeof b.allowlisted === "boolean" && principal !== d.owner) principal.allowlisted = b.allowlisted;
+        let agent = principal.agents.find(a => a.name === name);
+        if (!agent) {
+          agent = { name };
+          principal.agents.push(agent);
+        }
+        for (const key of ["endpoint_url", "transport", "token", "config"] as const) {
+          if (key in b) {
+            if (b[key] === null) delete agent[key];
+            else (agent as unknown as Record<string, unknown>)[key] = b[key];
+          }
+        }
+        principal.connected_at ??= new Date().toISOString();
+        // Anything parked for this handle can now flow.
+        for (const e of d.envelopes) if (e.state === "pending_invite" && e.to.handle === handle) e.state = "queued";
+        return agent;
+      });
+      res.json({ ok: true, handle, agent: { ...record, token: record.token ? "***" : undefined } });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.delete("/agents/:handle/:agent", requireBearer, async (req, res, next) => {
+    try {
+      const handle = normaliseHandle(String(req.params.handle));
+      const agentName = String(req.params.agent);
+      const removed = await store.mutate(d => {
+        const principal = handle === d.owner.handle ? d.owner : d.peers.find(p => p.handle === handle);
+        if (!principal) return false;
+        const before = principal.agents.length;
+        principal.agents = principal.agents.filter(a => a.name !== agentName);
+        if (principal !== d.owner && principal.agents.length === 0) d.peers = d.peers.filter(p => p !== principal);
+        return principal.agents.length !== before;
+      });
+      res.json({ ok: removed });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.use((_req, res) => res.status(404).json({ status: 404, error: "not found", see: `${baseUrl()}/openapi.json` }));
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const anyErr = err as { type?: string; status?: number };
+    if (anyErr?.type === "entity.parse.failed") {
+      res.status(400).json({ status: 400, error: "malformed JSON body" });
+      return;
+    }
+    sendError(res, err);
+  });
+  return app;
+}
+
+export async function boot() {
+  await store.load();
+  await loadVerbs();
+  await loadTransports();
+  buildTools();
+  const app = createApp();
+  const server = app.listen(config.port, config.host, () => {
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : config.port;
+    console.log(`[relay] listening on ${config.host}:${port}  public=${baseUrl()}  owner=${config.ownerHandle}  data=${config.dataFile}`);
+    if (config.tokenWasGenerated) {
+      console.warn(`[relay] RELAY_TOKEN not set — generated a temporary token for this process: ${config.token}`);
+    }
+    if (!config.publicUrl) console.warn("[relay] PUBLIC_URL not set — /connect will advertise localhost");
+    console.log(`RELAY_READY port=${port}`);
+  });
+  const shutdown = (sig: string) => {
+    console.log(`[relay] ${sig} received, shutting down`);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  return server;
+}
+
+boot().catch(err => {
+  console.error("[relay] failed to start:", err);
+  process.exit(1);
+});
