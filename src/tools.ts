@@ -55,12 +55,36 @@ export function buildTools(): ToolDef[] {
   const fromAgentField = z.string().min(1).optional().describe("Which of the user's agents you are (muse, claude-code, codex, cursor). Defaults to the agent bound to your token.");
 
   function actingAgent(explicit: string | undefined, ctx: ToolContext): string {
-    return explicit?.trim() || ctx.agent || store.impliedAgent(store.findPrincipal(ctx.handle)) || "unknown";
+    return explicit?.trim() || ctx.agent || store.frontDoor(ctx.handle) || "unknown";
   }
 
   /** A reply goes back to whoever asked; if they never said which agent, address it to any of theirs. */
   function replyTarget(from: Party): Party {
     return from.agent && from.agent !== "unknown" ? from : { handle: from.handle, agent: "*" };
+  }
+
+  /**
+   * Peer-to-peer is front door to front door. Between two people only their Muses talk: your Claude Code, Codex,
+   * Cursor… are private to you and cannot be addressed by, or address, anyone else. Same-person traffic is free.
+   */
+  function gate(from: Party, to: Party): Party {
+    if (from.handle === to.handle) return to;
+    const mine = store.frontDoor(from.handle);
+    if (mine && from.agent !== mine) {
+      throw new RelayError(403, `${from.agent} is private to ${from.handle}; only ${from.handle}/${mine} talks to other people. Answer ${from.handle}/${mine} and let it relay.`, {
+        policy: "front-door",
+        your_front_door: `${from.handle}/${mine}`
+      });
+    }
+    const theirs = store.frontDoor(to.handle);
+    if (!theirs) return to; // nobody by that handle yet → dispatcher returns not_connected + invite
+    if (to.agent !== "*" && to.agent !== theirs) {
+      throw new RelayError(403, `${to.handle}'s other agents are private; people reach ${to.handle} through ${to.handle}/${theirs}. Address "${to.handle}" instead.`, {
+        policy: "front-door",
+        use: to.handle
+      });
+    }
+    return { handle: to.handle, agent: theirs };
   }
 
   /** Polling is the heartbeat: remember when each agent last looked at its inbox (flushed with the next mutation). */
@@ -99,7 +123,11 @@ export function buildTools(): ToolDef[] {
         role: ctx.admin ? "hub owner" : ctx.handle === d.owner.handle ? "one of the hub owner's agents" : "guest on " + d.owner.handle + "'s hub",
         agents: (me?.agents ?? []).map(a => agentView(ctx.handle, a, "own")),
         display_name: me?.display_name ?? null,
-        peers: others.map(p => ({ handle: p.handle, person: p.display_name ?? null, allowlisted: Boolean(p.allowlisted), agents: p.agents.map(a => agentView(p.handle, a, "peer")) })),
+        peers: others.map(p => {
+          const door = store.frontDoor(p.handle);
+          return { handle: p.handle, person: p.display_name ?? null, allowlisted: Boolean(p.allowlisted), reach_via: p.handle, agents: p.agents.filter(a => a.name === door).map(a => agentView(p.handle, a, "peer")) };
+        }),
+        policy: "Between people only front-door agents talk (Muse to Muse). Your other agents are private to you; address people by handle.",
         verbs: listVerbs().map(v => ({
           verb: v.verb,
           describe: v.describe,
@@ -122,8 +150,14 @@ export function buildTools(): ToolDef[] {
     async handler(_args, ctx) {
       const d = store.snapshot;
       const all = [d.owner, ...d.peers];
-      const agents = all.flatMap(p => p.agents.map(a => agentView(p.handle, a, p.handle === ctx.handle ? "own" : "peer")));
-      const people = all.filter(p => p.handle !== ctx.handle).map(p => ({ handle: p.handle, person: p.display_name ?? null, agents: p.agents.length, allowlisted: Boolean(p.allowlisted), connected: Boolean(p.connected_at) }));
+      const agents = all.flatMap(p => {
+        if (p.handle === ctx.handle) return p.agents.map(a => agentView(p.handle, a, "own"));
+        const door = store.frontDoor(p.handle);
+        return p.agents.filter(a => a.name === door).map(a => agentView(p.handle, a, "peer"));
+      });
+      const people = all
+        .filter(p => p.handle !== ctx.handle)
+        .map(p => ({ handle: p.handle, person: p.display_name ?? null, reach_via: p.handle, allowlisted: Boolean(p.allowlisted), connected: Boolean(p.connected_at), last_seen: p.agents.find(a => a.name === store.frontDoor(p.handle))?.last_seen ?? null }));
       return { owner: ctx.handle, hub_owner: d.owner.handle, agents, people };
     }
   };
@@ -149,7 +183,7 @@ export function buildTools(): ToolDef[] {
       const args: Record<string, unknown> = { ...(a.args ?? {}) };
       if (a.question && verb.textField && args[verb.textField] === undefined) args[verb.textField] = a.question;
       const from: Party = { handle: ctx.handle, agent: actingAgent(a.from_agent, ctx) };
-      const env = validate(draft({ from, to: dispatcher.parseTarget(a.to, ctx.handle), verb: verb.verb, args, note: a.note ?? null }));
+      const env = validate(draft({ from, to: gate(from, dispatcher.parseTarget(a.to, ctx.handle)), verb: verb.verb, args, note: a.note ?? null }));
       const timeoutMs = Math.min(a.timeout_s ?? config.askDefaultTimeoutS, config.askMaxTimeoutS) * 1000;
       return dispatcher.ask(env, timeoutMs);
     }
@@ -175,7 +209,7 @@ export function buildTools(): ToolDef[] {
     async handler(a, ctx) {
       const from: Party = { handle: a.from_handle && ctx.admin ? dispatcher.normaliseHandle(a.from_handle) : ctx.handle, agent: actingAgent(a.from_agent, ctx) };
       const env = validate(
-        draft({ from, to: dispatcher.parseTarget(a.to, ctx.handle), verb: a.verb, args: a.args ?? {}, note: a.note ?? null, kind: a.kind, corr: a.corr ?? null, expires: a.expires })
+        draft({ from, to: gate(from, dispatcher.parseTarget(a.to, ctx.handle)), verb: a.verb, args: a.args ?? {}, note: a.note ?? null, kind: a.kind, corr: a.corr ?? null, expires: a.expires })
       );
       return dispatcher.send(env);
     }
@@ -280,7 +314,7 @@ export function buildTools(): ToolDef[] {
       const fromAgent = a.from_agent?.trim() || (original.to.agent !== "*" ? original.to.agent : undefined) || actingAgent(undefined, ctx);
       const from: Party = { handle: ctx.handle, agent: fromAgent };
       const reply = validate(
-        draft({ from, to: replyTarget(original.from), verb: verbName, args: a.args ?? {}, note: a.note ?? null, corr: original.id, kind: replyKindFor(verb, original.kind) })
+        draft({ from, to: gate(from, replyTarget(original.from)), verb: verbName, args: a.args ?? {}, note: a.note ?? null, corr: original.id, kind: replyKindFor(verb, original.kind) })
       );
       const result = await dispatcher.send(reply);
       await store.mutate(d => {

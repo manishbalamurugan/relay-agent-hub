@@ -782,11 +782,27 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
 
       // A mutating verb from someone other than the owner must be left for the human, never auto-answered.
       const guest = (await (await fetch(`${base}/invites`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ handle: "stranger" }) })).json()) as any;
-      const d = await fetch(`${base}/tools/agent.send`, { method: "POST", headers: { Authorization: `Bearer ${guest.token}`, "content-type": "application/json" }, body: JSON.stringify({ to: `${OWNER}/grok`, verb: "deal.propose", args: { subject: "sell bike", terms: { price: 100 } } }) });
+      const guestSend = (body: unknown) => fetch(`${base}/tools/agent.send`, { method: "POST", headers: { Authorization: `Bearer ${guest.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+      // Front-door policy: a stranger cannot address the owner's private agents at all…
+      const blocked = await guestSend({ to: `${OWNER}/grok`, verb: "deal.propose", args: { subject: "sell bike", terms: { price: 100 } } });
+      const bj = (await blocked.json()) as any;
+      expect(blocked.status === 403 && bj.policy === "front-door" && bj.use === OWNER, `stranger reached a private agent: ${blocked.status} ${JSON.stringify(bj)}`);
+      // …and what they send to the owner lands on the owner's Muse, never on the runners.
+      const d = await guestSend({ to: OWNER, verb: "deal.propose", args: { subject: "sell bike", terms: { price: 100 } } });
+      const dj = (await d.json()) as any;
       expect(d.status === 200, "deal.propose send failed");
       await new Promise(r => setTimeout(r, 800));
-      expect(/left for human: .* deal\.propose from @stranger/.test(alog), `runner should skip mutating verbs from others:\n${alog.slice(-600)}`);
-      expect(llmCalls.length === 1, "model should not have been called for a mutating verb");
+      const landed = (await call("inbox.list", { filter: { id: dj.id } })).data.messages[0];
+      expect(landed?.to.agent === "muse" && landed.needs_decision === true, `stranger's proposal should sit with the owner's muse: ${JSON.stringify(landed)}`);
+      expect(!alog.includes(dj.id) && llmCalls.length === 1, "private runners must never see a stranger's message");
+      // The owner's private agents cannot talk to other people either; they answer the owner's Muse instead.
+      const leak = await fetch(`${base}/tools/agent.send`, { method: "POST", headers: { Authorization: `Bearer ${await mintKey("grok")}`, "content-type": "application/json" }, body: JSON.stringify({ to: "@stranger", verb: "question.freeform", args: { question: "hi" } }) });
+      const lj = (await leak.json()) as any;
+      expect(leak.status === 403 && lj.your_front_door === `${OWNER}/muse`, `private agent reached a stranger: ${leak.status} ${JSON.stringify(lj)}`);
+      // A stranger only ever sees the owner's front door.
+      const gwho = (await (await fetch(`${base}/tools/identity.whoami`, { method: "POST", headers: { Authorization: `Bearer ${guest.token}`, "content-type": "application/json" }, body: "{}" })).json()) as any;
+      const ownerAsSeen = gwho.peers.find((p: any) => p.handle === OWNER);
+      expect(ownerAsSeen.agents.length === 1 && ownerAsSeen.agents[0].agent === "muse", `stranger sees owner agents: ${JSON.stringify(ownerAsSeen.agents.map((a: any) => a.agent))}`);
     } finally {
       runner.kill("SIGTERM");
       await new Promise<void>(r => llm.close(() => r()));

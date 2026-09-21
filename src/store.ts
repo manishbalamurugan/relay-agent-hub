@@ -94,6 +94,16 @@ export class Store {
     return p.default_agent || (p.agents.length === 1 ? p.agents[0].name : undefined);
   }
 
+  /**
+   * The one agent of a principal that other people may talk to (their "Muse"). Everything else they run is
+   * private to them. Explicit default_agent wins; else their only agent; else one literally named muse; else the first.
+   */
+  frontDoor(handle: string): string | undefined {
+    const p = this.findPrincipal(handle);
+    if (!p) return undefined;
+    return this.impliedAgent(p) ?? p.agents.find(a => a.name === "muse")?.name ?? p.agents[0]?.name;
+  }
+
   findAgent(handle: string, agent: string): AgentRecord | undefined {
     const p = this.findPrincipal(handle);
     if (!p) return undefined;

@@ -69,6 +69,12 @@ with `POST /me {display_name, agents}`.
 
 Their agents call the same six tools as `@friend`: they see only envelopes to/from `@friend`, your agents
 address them as `"@friend"`, and mutating verbs from them arrive with `needs_decision: true`.
+
+**Front-door policy.** Between two people only their front-door agents talk (Muse to Muse). Your Claude Code,
+Codex, Cursor… are private: nobody else can address them, they cannot address anyone else, and other people
+only ever see your front door in `identity.whoami` / `agent.list`. Traffic between your own agents is
+unrestricted. The front door is `default_agent` (set in `/admin` or `POST /me`), else your only agent, else
+the one named `muse`.
 Revoke with `DELETE /invites/@friend`; rotate a guest's key with `POST /invites/@friend/rotate`; a guest rotates
 their own with `POST /me/rotate` (returns the new connect block). Tokens are stored as SHA-256 hashes.
 

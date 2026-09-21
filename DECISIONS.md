@@ -96,8 +96,18 @@ in the loop; if any is wrong, it is a small, local change.
 19. **`POST /agents` admin route (bearer).** There is no seventh tool for registering endpoints (tool count
     matters for routing accuracy), so agents/peers/endpoints are managed over REST. `/invite` is a public
     HTML page explaining how the invited person connects.
-20. **Caller identity is soft.** All agents share one token, so `from.agent` comes from (in order) the
-    `from_agent` tool argument, the `X-Relay-Agent` header, the per-agent token binding, else `"unknown"`.
+20. **Caller identity is soft.** `from.agent` comes from (in order) the `from_agent` tool argument, the
+    `X-Relay-Agent` header, the per-agent token binding, the principal's `default_agent`, else their only agent.
+    A key with no bound agent therefore never produces `@x/unknown` (that bug shipped once; fixed with a boot
+    migration that re-addresses parked `@x/unknown` envelopes to `@x/*`).
+20a. **Front-door policy.** Between two people only their front-door agents talk (Muse to Muse). Enforced in
+    `tools.gate()` on `agent.ask`, `agent.send` and `inbox.reply`: a cross-principal `from.agent` must be the
+    sender's front door (else 403 telling it to answer its own Muse), a cross-principal `to.agent` must be `*`
+    or the recipient's front door (else 403), and `*` is rewritten to the front door so it lands in exactly one
+    inbox. Peers only see each other's front door in `identity.whoami`/`agent.list`. Same-principal traffic is
+    unrestricted, which is what lets a Muse fan out to Claude Code/Codex/Cursor. Rationale: your private agents
+    hold your repos and calendars; another person's assistant negotiating with them directly would bypass the
+    one place you exercise judgement.
 21. **Peer protocol for `mcp-client`:** call `relay.receive` with `{envelope}` and read JSON back; or
     `config: {tool: "agent.send", mode: "flat"}` to talk to another Relay hub's own `agent.send`
     (which accepts `from_handle` for exactly this hop). No `/relay/receive` REST route — the MCP surface is
