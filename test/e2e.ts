@@ -557,6 +557,43 @@ try {
       await friend.close().catch(() => undefined);
     }
   });
+  await step(21, "Extra: OAuth 2.1 sign-in (discovery → DCR → authorize with Relay key → PKCE token) yields a working bearer", async () => {
+    const { createHash, randomBytes } = await import("node:crypto");
+    const unauth = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const www = unauth.headers.get("www-authenticate") ?? "";
+    expect(unauth.status === 401 && www.includes("resource_metadata="), `challenge header: ${www}`);
+    const prm = (await (await fetch(`${base}/.well-known/oauth-protected-resource/mcp`)).json()) as any;
+    expect(prm.authorization_servers?.[0] === base, "protected resource metadata");
+    const asm = (await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()) as any;
+    expect(asm.code_challenge_methods_supported?.includes("S256") && asm.registration_endpoint, "AS metadata");
+    const reg = await fetch(asm.registration_endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "claude-mobile-test", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] }) });
+    const client = (await reg.json()) as any;
+    expect(reg.status === 201 && client.client_id, `DCR ${JSON.stringify(client)}`);
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const authUrl = `${asm.authorization_endpoint}?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent("https://claude.ai/api/mcp/auth_callback")}&code_challenge=${challenge}&code_challenge_method=S256&state=xyz&scope=relay`;
+    const page = await fetch(authUrl);
+    expect(page.status === 200 && (await page.text()).includes("Relay key"), "authorize page");
+    const form = new URLSearchParams({ client_id: client.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_challenge: challenge, state: "xyz", scope: "relay", relay_key: `Bearer ${TOKEN}` });
+    const wrong = await fetch(`${base}/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ...Object.fromEntries(form), relay_key: "rly_nope" }), redirect: "manual" });
+    expect(wrong.status === 401, `wrong key should re-render form: ${wrong.status}`);
+    const ok = await fetch(`${base}/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form, redirect: "manual" });
+    const loc = ok.headers.get("location") ?? "";
+    expect(ok.status === 302 && loc.startsWith("https://claude.ai/api/mcp/auth_callback?") && loc.includes("state=xyz"), `redirect ${ok.status} ${loc}`);
+    const code = new URL(loc).searchParams.get("code")!;
+    const badPkce = await fetch(asm.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code, client_id: client.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_verifier: "wrong" }) });
+    expect(badPkce.status === 400, "bad PKCE verifier accepted");
+    // code is single-use; the failed attempt consumed it, so re-authorize for the happy path
+    const ok2 = await fetch(`${base}/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form, redirect: "manual" });
+    const code2 = new URL(ok2.headers.get("location")!).searchParams.get("code")!;
+    const tok = await fetch(asm.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code: code2, client_id: client.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_verifier: verifier }) });
+    const tj = (await tok.json()) as any;
+    expect(tok.status === 200 && tj.access_token && tj.token_type === "bearer", `token ${JSON.stringify(tj)}`);
+    const who = await fetch(`${base}/tools/identity.whoami`, { method: "POST", headers: { Authorization: `Bearer ${tj.access_token}`, "content-type": "application/json" }, body: "{}" });
+    expect(who.status === 200 && ((await who.json()) as any).owner === OWNER, "OAuth-issued token does not authenticate");
+    const rt = await fetch(asm.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tj.refresh_token }) });
+    expect(rt.status === 200, "refresh failed");
+  });
 } finally {
   await mcp?.close().catch(() => undefined);
   await stopServer();

@@ -23,6 +23,10 @@ Then create a recurring task: every 15 minutes, call inbox.list.
 If anything needs my decision, summarise it and ask me before replying.
 ```
 
+Clients that only offer OAuth "sign in" (Claude mobile, some connector UIs) work too: Relay advertises itself
+as an OAuth 2.1 authorization server, and the sign-in page simply asks for your Relay key. The access token
+issued is that same key, so nothing changes server-side and revocation still works.
+
 Clients without MCP support can read `/openapi.json` (public) and call `POST /tools/<tool>` with the same header.
 
 ## Give each of your own assistants its own key

@@ -6,7 +6,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
-import { config } from "./config.js";
+import { baseUrl, config } from "./config.js";
 import { store } from "./store.js";
 
 const agentTokens = new Map<string, string>(); // token -> agent name
@@ -82,7 +82,7 @@ export function requireBearer(req: Request, res: Response, next: NextFunction): 
   if (!caller) {
     res
       .status(401)
-      .set("WWW-Authenticate", 'Bearer realm="relay"')
+      .set("WWW-Authenticate", `Bearer realm="relay", resource_metadata="${baseUrl()}/.well-known/oauth-protected-resource/mcp"`)
       .json({
         status: 401,
         error: "missing or invalid bearer token",

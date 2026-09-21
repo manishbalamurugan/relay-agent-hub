@@ -128,6 +128,14 @@ in the loop; if any is wrong, it is a small, local change.
     consumer assistants on one hub are distinguishable without trusting each to name itself. RELAY_TOKEN
     remains the only admin credential.
 
+33. **OAuth 2.1 shim (added because Claude mobile offers OAuth only).** `/.well-known/*`, `/register` (DCR,
+    public clients), `/authorize` (paste-your-Relay-key page), `/token` (PKCE S256 enforced, single-use codes,
+    10-min TTL). The access token *is* the pasted key — no second credential store, revocation unchanged.
+    Unauthenticated `/mcp` now returns the RFC 9728 `resource_metadata` challenge so clients discover it.
+    Registered clients and pending codes live in memory (single instance; a restart just means signing in again).
+    The brief warned OAuth servers are a failure mode; this is deliberately the thinnest possible one, and the
+    static bearer path is untouched and still preferred.
+
 ## Not built (on purpose)
 
 - No UI beyond `/connect` and `/invite`, no database, no OAuth, no message signing (schema says

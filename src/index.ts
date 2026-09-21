@@ -14,6 +14,7 @@ import { callerAgent, extractToken, getCaller, hashToken, requireAdmin, requireB
 import { baseUrl, config } from "./config.js";
 import { handleMcp, sessionCount } from "./mcp.js";
 import { buildOpenApi } from "./openapi.js";
+import { oauthRouter } from "./oauth.js";
 import { loadVerbs, verbNames } from "./registry.js";
 import { store } from "./store.js";
 import { buildTools, runTool } from "./tools.js";
@@ -95,6 +96,7 @@ export function createApp() {
 
   // ---- public ------------------------------------------------------------------------------
   app.get("/", (_req, res) => res.redirect("/connect"));
+  app.use(oauthRouter());
 
   app.get("/health", (_req, res) => {
     const volume = process.env.RAILWAY_VOLUME_MOUNT_PATH ?? null;
