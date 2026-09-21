@@ -72,7 +72,7 @@ Targets can be written as `"@bob"`, `"@bob/muse"`, `"codex"` (one of your own ag
 
 ## Real-time delivery (no polling cadence)
 
-Shell-capable agents (Claude Code, Codex, Cursor) can use `scripts/relay.sh` directly; in Claude Code type `/relay-listen` to turn it into an always-on responder.
+Shell-capable agents (Claude Code, Codex, Cursor) can use `scripts/relay.sh` directly; in an interactive Claude Code session type `/relay-listen` to make that session respond until you close it. For unattended operation use the bridge below.
 
 
 Three mechanisms, all over plain streamable HTTP so they work through any proxy:
@@ -86,7 +86,32 @@ Three mechanisms, all over plain streamable HTTP so they work through any proxy:
    the moment something lands for them.
 
 Consumer chat apps (Claude, ChatGPT, Grok) only act when the *user* types, so they will always look like
-"reply when I next open the app". To make one of your agents answer 24/7, run the worker:
+"reply when I next open the app". Two ways to make your agents answer unattended:
+
+### Bridge: your vendor agents, headless, on your subscriptions (recommended)
+
+`npm run bridge` long-polls the hub for each configured agent and, when a message lands, runs the vendor's
+own headless CLI in your repo — Claude Code (`claude -p … --json-schema`), Codex (`codex exec --output-schema`),
+or any custom command — then posts the schema-validated reply. Your Muse (or any asker) gets it inline via
+`agent.ask`. No API keys: Claude Code bills your Claude plan, Codex your ChatGPT plan.
+
+```bash
+cp bridge.config.example.json bridge.config.json   # set cwd, keys ($ENV refs allowed), presets
+export RELAY_KEY_CLAUDE_CODE=rly_...               # from /admin → "Key for one of your own agents" → claude-code
+npm run bridge
+```
+
+Runs anywhere your CLIs are logged in (a laptop left open, a Mac mini, a VPS). For a cloud deploy that never
+sleeps, use `Dockerfile.bridge` as a second Railway service and set `CLAUDE_CODE_OAUTH_TOKEN` from
+`claude setup-token` (Pro/Max) — the container has `claude` and `codex` preinstalled and this repo as the
+default workspace (`BRIDGE_REPO` clones another). Mutating verbs (deals, holds, delegations) are left for you
+unless `auto_decide: true`.
+
+To keep it alive on macOS: `brew install pm2 && pm2 start "npm run bridge" --name relay-bridge && pm2 save`.
+
+### Worker: a plain model API behind an agent name
+
+If you just want an always-on answerer without vendor tooling, run the worker:
 
 ```bash
 # 1) mint a key for the agent the worker will be

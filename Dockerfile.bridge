@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Relay Bridge image: runs your vendor CLIs (Claude Code, Codex) headless on your subscriptions, 24/7.
+# Deploy as a second Railway service from this repo with Dockerfile path = Dockerfile.bridge.
+# Required env: RELAY_URL, RELAY_KEY (agent key from /admin, e.g. claude-code), and one of:
+#   CLAUDE_CODE_OAUTH_TOKEN  (from `claude setup-token` on your laptop — Pro/Max subscription)
+#   ANTHROPIC_API_KEY        (metered API instead)
+#   CODEX_AUTH_JSON          (contents of ~/.codex/auth.json, for BRIDGE_PRESET=codex)
+# Optional: BRIDGE_AGENT (default claude-code), BRIDGE_PRESET (claude-code|codex), BRIDGE_PERSONA,
+#           BRIDGE_CONFIG (path to a bridge.config.json for several agents), BRIDGE_REPO (git URL to clone as cwd).
+FROM node:20-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+FROM node:20-slim
+ENV NODE_ENV=production
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl ripgrep && rm -rf /var/lib/apt/lists/* \
+ && npm install -g @anthropic-ai/claude-code @openai/codex && npm cache clean --force
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+COPY --from=build /app/dist ./dist
+# The bridge's default working directory is this repo, so "ask claude-code about the hub" works out of the box.
+COPY . /work
+ENV BRIDGE_CWD=/work
+# Optional: clone another repo at boot to be the agent's workspace.
+CMD ["sh", "-c", "if [ -n \"$BRIDGE_REPO\" ]; then git clone --depth 1 \"$BRIDGE_REPO\" /work-repo && export BRIDGE_CWD=/work-repo; fi; exec node dist/bridge/index.js"]

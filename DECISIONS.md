@@ -78,6 +78,11 @@ in the loop; if any is wrong, it is a small, local change.
     design (decision 1); a multi-instance deploy would swap it for a shared channel.
 20. **A reply returned inline by `agent.ask` is marked `delivered`**, so it does not also show up as a
     pending inbox item and get "answered" twice.
+22. **The bridge runs vendor CLIs rather than vendor APIs.** The owner's value is in *their* agents — Claude
+    Code with the repo open, Codex with its sandbox — on subscriptions they already pay for, not in a raw model.
+    Claude Code's `-p --json-schema` and Codex's `exec --output-schema` both emit schema-conforming JSON, so the
+    reply schema in each verb is enforced twice: by the vendor CLI and by the hub. Consumer chat apps have no
+    headless entry point, so the bridge is the honest stand-in for "my Claude" / "my ChatGPT".
 21. **The worker is a client, not a hub feature.** `src/worker` only uses the public REST tools, so anyone
     can write a worker in any language; the hub never holds model API keys. Policy (answer non-mutating verbs,
     leave mutating ones for the human) lives in the worker because it is the owner's choice, not the hub's.

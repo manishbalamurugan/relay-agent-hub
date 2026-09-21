@@ -704,6 +704,78 @@ try {
       await new Promise<void>(r => llm.close(() => r()));
     }
   });
+  await step(24, "Extra: Relay Bridge — runs vendor CLIs (fake `claude` + `codex` on PATH) headless; both answer agent.ask inline", async () => {
+    // Fake vendor CLIs that behave like the real headless modes.
+    const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "relay-fakebin-"));
+    await fs.writeFile(
+      path.join(binDir, "claude"),
+      `#!/usr/bin/env bash
+# expects: -p <prompt> --output-format json --json-schema <schema> [extra]
+prompt="$2"; [ "$3" = "--output-format" ] && [ "$4" = "json" ] || { echo "bad flags: $*" >&2; exit 2; }
+[ "$5" = "--json-schema" ] || { echo "missing --json-schema" >&2; exit 2; }
+q=$(printf '%s' "$prompt" | grep -o '"question": "[^"]*"' | head -1 | sed 's/"question": "//; s/"$//')
+printf '{"type":"result","result":"ok","structured_output":{"answer":"fake claude (cwd %s): %s","confidence":0.8}}\\n' "$(basename "$PWD")" "$q"
+`
+    );
+    await fs.writeFile(
+      path.join(binDir, "codex"),
+      `#!/usr/bin/env bash
+# expects: exec --ephemeral --skip-git-repo-check --output-schema <file> -o <last> [--sandbox read-only] <prompt>
+[ "$1" = "exec" ] || exit 2
+last=""; schema=""; prompt="\${@: -1}"
+while [ $# -gt 0 ]; do case "$1" in -o) last="$2"; shift;; --output-schema) schema="$2"; shift;; esac; shift; done
+[ -f "$schema" ] || { echo "no schema file" >&2; exit 2; }
+q=$(printf '%s' "$prompt" | grep -o '"question": "[^"]*"' | head -1 | sed 's/"question": "//; s/"$//')
+printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat "$last"
+`
+    );
+    await fs.chmod(path.join(binDir, "claude"), 0o755);
+    await fs.chmod(path.join(binDir, "codex"), 0o755);
+
+    const mintKey = async (agent: string) =>
+      (((await (await fetch(`${base}/agents/tokens`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ agent }) })).json()) as any).token as string);
+    const kClaude = await mintKey("claude-code");
+    const kCodex = await mintKey("codex");
+    const cfgFile = path.join(binDir, "bridge.config.json");
+    await fs.writeFile(
+      cfgFile,
+      JSON.stringify({
+        hub: base,
+        agents: [
+          { name: "claude-code", key: "$K_CLAUDE", preset: "claude-code", cwd: root, extra_args: ["--allowedTools", "Read"] },
+          { name: "codex", key: kCodex, preset: "codex", cwd: root, timeout_s: 30 }
+        ]
+      })
+    );
+    let blog = "";
+    const bridge = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "bridge", "index.ts")], {
+      cwd: root,
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, BRIDGE_CONFIG: cfgFile, K_CLAUDE: kClaude, PORT: "" },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    bridge.stdout!.on("data", d => (blog += d.toString()));
+    bridge.stderr!.on("data", d => (blog += d.toString()));
+    try {
+      const deadline = Date.now() + 15_000;
+      while (!(blog.includes("[bridge:claude-code] online") && blog.includes("[bridge:codex] online")) && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
+      expect(blog.includes(`online as ${OWNER}/claude-code`) && blog.includes(`online as ${OWNER}/codex`), `bridge did not come online:\n${blog}`);
+      await new Promise(r => setTimeout(r, 300));
+
+      const [rc, rx] = await Promise.all([
+        call("agent.ask", { to: `${OWNER}/claude-code`, verb: "question.freeform", args: { question: "how does auth work" }, timeout_s: 20 }),
+        call("agent.ask", { to: `${OWNER}/codex`, verb: "question.freeform", args: { question: "list the verbs" }, timeout_s: 20 })
+      ]);
+      expect(!rc.isError && rc.data.status === "answered", `claude-code not answered inline: ${JSON.stringify(rc.data).slice(0, 300)}\n${blog}`);
+      expect(rc.data.reply.args.answer === `fake claude (cwd ${path.basename(root)}): how does auth work`, `claude answer: ${rc.data.reply.args.answer}`);
+      expect(!rx.isError && rx.data.status === "answered", `codex not answered inline: ${JSON.stringify(rx.data).slice(0, 300)}\n${blog}`);
+      expect(rx.data.reply.args.answer === "fake codex: list the verbs", `codex answer: ${rx.data.reply.args.answer}`);
+      // Fan-out: the two asks ran concurrently and each agent handled exactly one.
+      expect((blog.match(/answered env_/g) ?? []).length === 2, `expected 2 answered lines\n${blog}`);
+    } finally {
+      bridge.kill("SIGTERM");
+      await fs.rm(binDir, { recursive: true, force: true });
+    }
+  });
 } finally {
   await mcp?.close().catch(() => undefined);
   await stopServer();

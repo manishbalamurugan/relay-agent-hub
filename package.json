@@ -8,6 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "worker": "node dist/worker/index.js",
+    "bridge": "node dist/bridge/index.js",
+    "bridge:dev": "tsx src/bridge/index.ts",
     "worker:dev": "tsx src/worker/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"

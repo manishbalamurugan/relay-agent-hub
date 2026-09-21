@@ -61,7 +61,7 @@ export function buildTools(): ToolDef[] {
   function agentView(handle: string, a: { name: string; endpoint_url?: string; last_seen?: string }, kind: "own" | "peer") {
     const reachable = Boolean(dispatcher.resolve({ handle, agent: a.name }).mode === "sync");
     const person = store.findPrincipal(handle)?.display_name ?? null;
-    return { handle, person, agent: a.name, kind, can_answer_now: reachable, delivery: reachable ? "sync" : "inbox (polled)", last_seen: a.last_seen ?? null };
+    return { handle, person, agent: a.name, kind, can_answer_now: reachable, delivery: reachable ? "sync" : "inbox (answers inline while its bridge/worker is listening)", last_seen: a.last_seen ?? null };
   }
 
   function inboundFor(e: StoredEnvelope, handle: string, forAgent?: string): boolean {

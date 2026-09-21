@@ -1,0 +1,29 @@
+{
+  "hub": "https://relay-agent-hub-production.up.railway.app",
+  "agents": [
+    {
+      "name": "claude-code",
+      "key": "$RELAY_KEY_CLAUDE_CODE",
+      "preset": "claude-code",
+      "cwd": "~/code/relay-agent-hub",
+      "extra_args": ["--allowedTools", "Read,Grep,Glob,WebSearch,Bash(git log:*),Bash(git diff:*)"],
+      "persona": "You are Manish's coding agent. Answer from the repository when relevant.",
+      "timeout_s": 300,
+      "auto_decide": false
+    },
+    {
+      "name": "codex",
+      "key": "$RELAY_KEY_CODEX",
+      "preset": "codex",
+      "cwd": "~/code/relay-agent-hub",
+      "extra_args": ["--sandbox", "read-only"]
+    },
+    {
+      "name": "cursor",
+      "key": "$RELAY_KEY_CURSOR",
+      "preset": "custom",
+      "command": ["cursor-agent", "-p", "{prompt}", "--output-format", "text"],
+      "cwd": "~/code/relay-agent-hub"
+    }
+  ]
+}
