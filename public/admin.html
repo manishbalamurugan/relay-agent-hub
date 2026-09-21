@@ -9,73 +9,74 @@
 <body>
 <main class="narrow">
   <h1>Relay<span>.</span> Owner console</h1>
-  <p class="lede">Mint invite links for friends and keys for your own agents. Everything here calls the hub's REST API with your owner key; nothing is stored server-side beyond what those calls create.</p>
+  <p class="lede">Invite people, mint keys for your own agents, and manage what's issued. Every action calls the hub's API with your owner key; the key stays in this tab.</p>
 
   <section class="card">
     <h2>Your owner key</h2>
     <input id="key" type="password" placeholder="the RELAY_TOKEN you set in Railway" autocomplete="off">
-    <div class="hint">Kept only in this tab (sessionStorage). Guest and agent keys are rejected here.</div>
-    <div id="keystatus" class="hint"></div>
+    <div id="keystatus" class="hint">Kept only in this tab. Guest and agent keys are rejected here.</div>
   </section>
 
   <section class="card">
     <h2>Invite a person</h2>
-    <label for="ihandle">Their handle (leave blank to let them pick)</label>
-    <input id="ihandle" placeholder="saurabh">
+    <label for="ihandle">Their handle (blank = they pick one)</label>
+    <input id="ihandle" placeholder="handle, e.g. alex">
     <label for="iname">Their name (optional)</label>
-    <input id="iname" placeholder="Saurabh">
-    <label><input id="iallow" type="checkbox">Allowlisted: their non-binding messages don't need my decision</label>
+    <input id="iname" placeholder="Display name">
+    <label><input id="iallow" type="checkbox">Allowlisted: their questions and pings don't need my sign-off</label>
     <button id="invite">Create invite link</button>
     <div id="iout"></div>
   </section>
 
   <section class="card">
     <h2>Key for one of your own agents</h2>
-    <label for="aname">Agent name</label>
-    <input id="aname" placeholder="claude-code, claude, chatgpt, grok…">
+    <label for="aname">Agent name (what others will address, e.g. claude-code, cursor)</label>
+    <input id="aname" placeholder="agent name">
     <button id="mint">Mint agent key</button>
     <div id="aout"></div>
   </section>
 
   <section class="card">
-    <h2>Existing keys</h2>
+    <div class="row"><h2 style="margin:0">People and keys</h2><button id="reset" class="secondary" style="margin:0">Reset my agents…</button></div>
     <div id="list" class="hint">Enter your owner key to load.</div>
   </section>
 </main>
 <script>
-  const base = location.origin;
   const $ = id => document.getElementById(id);
   const key = $('key');
   key.value = sessionStorage.getItem('relay_owner_key') || '';
   key.addEventListener('change', () => { sessionStorage.setItem('relay_owner_key', key.value.trim()); load(); });
 
   async function api(method, path, body) {
-    const k = key.value.trim();
+    const k = key.value.trim().replace(/^Bearer\s+/i, '');
     if (!k) throw new Error('Enter your owner key first.');
-    const r = await fetch(base + path, { method, headers: { Authorization: 'Bearer ' + k.replace(/^Bearer\s+/i, ''), 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const r = await fetch(path, { method, headers: { Authorization: 'Bearer ' + k, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || (r.status === 401 ? 'Key rejected (401).' : r.status === 403 ? 'That key is not the owner key (403).' : 'HTTP ' + r.status));
+    if (!r.ok) throw new Error(j.error || (r.status === 401 ? 'Key rejected (401).' : r.status === 403 ? 'That is not the owner key (403).' : 'HTTP ' + r.status));
     return j;
   }
-  function show(el, html, cls) { el.innerHTML = '<div class="' + (cls || 'ok') + '">' + html + '</div>'; }
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const show = (el, msg, cls) => { el.innerHTML = '<div class="' + (cls || 'ok') + '">' + esc(msg) + '</div>'; };
   function result(el, title, text, sms) {
-    el.innerHTML = '<div class="ok">' + title + '</div><pre id="' + el.id + '-pre">' + text.replace(/</g, '&lt;') + '</pre><div class="row"><button class="secondary" data-copy="' + el.id + '-pre">Copy</button>' +
+    el.innerHTML = '<div class="ok">' + esc(title) + '</div><pre id="' + el.id + '-pre">' + esc(text) + '</pre><div class="row" style="justify-content:flex-start"><button class="secondary" data-copy="' + el.id + '-pre">Copy</button>' +
       (sms ? '<a href="sms:?&body=' + encodeURIComponent(sms) + '"><button class="secondary">Text it</button></a>' : '') + '</div>';
   }
-  document.addEventListener('click', async e => {
-    const id = e.target.dataset && e.target.dataset.copy;
-    if (id) { await navigator.clipboard.writeText($(id).innerText); e.target.textContent = 'Copied'; }
-    const rev = e.target.dataset && e.target.dataset.revoke;
-    if (rev && confirm('Revoke every key for ' + rev + '? Their agents disconnect immediately.')) { try { await api('DELETE', '/invites/' + encodeURIComponent(rev)); load(); } catch (err) { alert(err.message); } }
+  async function act(fn) { try { await fn(); await load(); } catch (err) { alert(err.message); } }
+
+  document.addEventListener('click', e => {
+    const d = e.target.dataset || {};
+    if (d.copy) navigator.clipboard.writeText($(d.copy).innerText).then(() => (e.target.textContent = 'Copied'));
+    if (d.revokePeer && confirm('Revoke every key for ' + d.revokePeer + '? Their agents disconnect immediately.')) act(() => api('DELETE', '/invites/' + encodeURIComponent(d.revokePeer)));
+    if (d.revokeAgent && confirm('Revoke the key(s) for your agent "' + d.revokeAgent + '"?')) act(() => api('DELETE', '/agents/tokens/' + encodeURIComponent(d.revokeAgent)));
+    if (d.allow) act(() => api('POST', '/invites/' + encodeURIComponent(d.allow), { allowlisted: d.to === '1' }));
   });
 
   $('invite').addEventListener('click', async () => {
     try {
       const h = $('ihandle').value.trim(), n = $('iname').value.trim();
       const j = await api('POST', '/invites', { handle: h || undefined, display_name: n || undefined, allowlisted: $('iallow').checked });
-      const who = j.handle || 'your friend';
-      result($('iout'), 'Invite for ' + who + ' created. Send them this link (it contains their key, so send it privately):', j.invite_url,
-        (n || 'Hey') + ' — here is your Relay invite. Open it, copy the block into Muse, and your agents can talk to mine: ' + j.invite_url);
+      result($('iout'), 'Invite for ' + (j.handle || 'your friend') + ' created. Send this link privately — it contains their key:', j.invite_url,
+        (n ? n + ' — ' : '') + 'here is your Relay invite. Open it, copy the block into your assistant, and your agents can talk to mine: ' + j.invite_url);
       load();
     } catch (err) { show($('iout'), err.message, 'err'); }
   });
@@ -83,21 +84,40 @@
   $('mint').addEventListener('click', async () => {
     try {
       const j = await api('POST', '/agents/tokens', { agent: $('aname').value.trim() });
-      result($('aout'), 'Key for ' + j.handle + '/' + j.agent + '. Paste this into that agent:', j.connect_block);
+      result($('aout'), 'Key for ' + j.handle + '/' + j.agent + '. Give this to that agent (agents.json or the connect block):', j.token + '\n\n' + j.connect_block);
       load();
     } catch (err) { show($('aout'), err.message, 'err'); }
+  });
+
+  $('reset').addEventListener('click', () => {
+    const keep = prompt('Revoke ALL keys for your own agents and remove their records. People you invited are untouched.\n\nAgents to keep (comma-separated):', 'muse');
+    if (keep === null) return;
+    act(async () => { const j = await api('POST', '/agents/reset', { keep: keep.split(',').map(s => s.trim()).filter(Boolean) }); alert('Revoked ' + j.revoked + ' key(s). Removed: ' + (j.removed.join(', ') || 'none') + '. Kept: ' + j.kept.join(', ')); });
   });
 
   async function load() {
     if (!key.value.trim()) return;
     try {
-      const [j, me] = await Promise.all([api('GET', '/invites'), api('POST', '/tools/identity.whoami', {})]);
-      $('keystatus').innerHTML = '<span class="ok">Owner key accepted — you are ' + me.owner + '.</span>';
-      const rows = (j.tokens || []).filter(t => !t.revoked_at).map(t =>
-        '<tr><td><strong>' + (t.handle || '(open invite, unclaimed)') + '</strong>' + (t.agent ? ' / ' + t.agent : '') + '<div class="hint">' + (t.label || '') + ' · ' + new Date(t.created_at).toLocaleString() + '</div></td>' +
-        (t.handle && t.handle !== me.owner ? '<td class="act"><button class="secondary" data-revoke="' + t.handle + '">Revoke</button></td>' : '<td></td>') + '</tr>').join('');
-      $('list').innerHTML = rows ? '<table>' + rows + '</table>' : '<div class="hint">No invites or agent keys yet.</div>';
-    } catch (err) { $('keystatus').innerHTML = '<span class="err">' + err.message + '</span>'; }
+      const [inv, me, reg] = await Promise.all([api('GET', '/invites'), api('POST', '/tools/identity.whoami', {}), api('GET', '/agents')]);
+      $('keystatus').innerHTML = '<span class="ok">Owner key accepted — you are ' + esc(me.owner) + '.</span>';
+      const live = (inv.tokens || []).filter(t => !t.revoked_at);
+      const when = t => new Date(t.created_at).toLocaleDateString();
+      let rows = '<tr><td colspan="2"><h2 style="margin:8px 0 4px">Your agents</h2></td></tr>';
+      rows += (reg.owner.agents || []).map(a => {
+        const keys = live.filter(t => t.handle === me.owner && t.agent === a.name);
+        return '<tr><td><strong>' + esc(a.name) + '</strong><div class="hint">' + (keys.length ? keys.length + ' key(s) · since ' + when(keys[0]) : 'no key — reached via the owner key or a connector') + '</div></td>' +
+          '<td class="act">' + (keys.length ? '<button class="secondary" data-revoke-agent="' + esc(a.name) + '">Revoke key</button>' : '') + '</td></tr>';
+      }).join('') || '<tr><td class="hint">none</td></tr>';
+      rows += '<tr><td colspan="2"><h2 style="margin:16px 0 4px">People</h2></td></tr>';
+      rows += (reg.peers || []).map(p => {
+        const keys = live.filter(t => t.handle === p.handle);
+        return '<tr><td><strong>' + esc(p.handle) + '</strong>' + (p.display_name ? ' · ' + esc(p.display_name) : '') + '<div class="hint">agents: ' + (p.agents.map(a => a.name).join(', ') || '—') + ' · ' + keys.length + ' key(s) · ' + (p.allowlisted ? 'allowlisted' : 'needs my sign-off') + '</div></td>' +
+          '<td class="act"><button class="secondary" data-allow="' + esc(p.handle) + '" data-to="' + (p.allowlisted ? '0' : '1') + '">' + (p.allowlisted ? 'Un-allowlist' : 'Allowlist') + '</button> <button class="secondary" data-revoke-peer="' + esc(p.handle) + '">Revoke</button></td></tr>';
+      }).join('') || '<tr><td class="hint">nobody invited yet</td></tr>';
+      const open = live.filter(t => t.handle === '');
+      if (open.length) rows += '<tr><td class="hint" colspan="2">' + open.length + ' open invite(s) not yet claimed</td></tr>';
+      $('list').innerHTML = '<table>' + rows + '</table>';
+    } catch (err) { $('keystatus').innerHTML = '<span class="err">' + esc(err.message) + '</span>'; }
   }
   load();
 </script>

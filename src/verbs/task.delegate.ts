@@ -18,7 +18,9 @@ export default {
       accepted: { type: "boolean", description: "Whether the receiving agent takes the task." },
       task_id: { type: "string", description: "Identifier to poll with task.status. Defaults to the request envelope id." },
       eta: { type: "string", format: "date-time" },
-      reason: { type: "string", maxLength: 2000, description: "Why it was declined, if not accepted." }
+      reason: { type: "string", maxLength: 2000, description: "Why it was declined, if not accepted." },
+      summary: { type: "string", maxLength: 4000, description: "What was done or the current state, when the task was completed inline." },
+      links: { type: "array", maxItems: 10, items: { type: "string", maxLength: 500 }, description: "Where to see the work: PR, branch, agent run, document." }
     },
     required: ["accepted"],
     additionalProperties: false

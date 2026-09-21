@@ -16,7 +16,7 @@ export const config = {
   ownerHandle: ((h: string) => (h.startsWith("@") ? h : `@${h}`))((process.env.OWNER_HANDLE || "@owner").trim() || "@owner"),
   /** Agent the bare RELAY_TOKEN acts as when the caller does not say (store setting overrides). */
   ownerTokenAgent: process.env.RELAY_TOKEN_AGENT || "",
-  ownerAgents: (process.env.OWNER_AGENTS || "muse,claude-code,codex,cursor")
+  ownerAgents: (process.env.OWNER_AGENTS || "muse")
     .split(",")
     .map(s => s.trim())
     .filter(Boolean),

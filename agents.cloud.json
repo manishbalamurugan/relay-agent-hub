@@ -1,0 +1,13 @@
+{
+  "hub": "$RELAY_URL",
+  "agents": [
+    {
+      "name": "cursor",
+      "key": "$RELAY_KEY_CURSOR",
+      "preset": "cursor",
+      "api_key": "$CURSOR_API_KEY",
+      "repo": "$AGENT_REPO_URL",
+      "ref": "main"
+    }
+  ]
+}

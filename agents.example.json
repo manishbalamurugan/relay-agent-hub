@@ -6,7 +6,10 @@
       "key": "$RELAY_KEY_CLAUDE_CODE",
       "preset": "claude-code",
       "cwd": "~/code/relay-agent-hub",
-      "extra_args": ["--allowedTools", "Read,Grep,Glob,WebSearch,Bash(git log:*),Bash(git diff:*)"],
+      "extra_args": [
+        "--allowedTools",
+        "Read,Grep,Glob,WebSearch,Bash(git log:*),Bash(git diff:*)"
+      ],
       "persona": "You are Manish's coding agent. Answer from the repository when relevant."
     },
     {
@@ -16,18 +19,20 @@
       "cwd": "~/code/relay-agent-hub"
     },
     {
-      "name": "cursor",
-      "key": "$RELAY_KEY_CURSOR",
-      "preset": "custom",
-      "command": ["cursor-agent", "-p", "{prompt}", "--output-format", "text"],
-      "cwd": "~/code/relay-agent-hub"
-    },
-    {
       "name": "claude",
       "key": "$RELAY_KEY_CLAUDE",
       "preset": "api",
       "api_key": "$ANTHROPIC_API_KEY",
       "persona": "General assistant with web search. Concrete, current, brief."
+    },
+    {
+      "name": "cursor",
+      "key": "$RELAY_KEY_CURSOR",
+      "preset": "cursor",
+      "api_key": "$CURSOR_API_KEY",
+      "repo": "https://github.com/manishbalamurugan/relay-agent-hub",
+      "ref": "main",
+      "persona": "You are Manish's Cursor cloud agent. For tasks, implement them on a branch and summarise what you did."
     }
   ]
 }

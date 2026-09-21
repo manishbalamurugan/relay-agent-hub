@@ -72,7 +72,7 @@ async function startServer(): Promise<void> {
   serverLog = "";
   child = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "index.ts")], {
     cwd: root,
-    env: { ...process.env, PORT: String(port), RELAY_TOKEN: TOKEN, OWNER_HANDLE: OWNER, DATA_FILE, PUBLIC_URL: base, NOTIFY_WEBHOOK_URL: "" },
+    env: { ...process.env, PORT: String(port), RELAY_TOKEN: TOKEN, OWNER_HANDLE: OWNER, OWNER_AGENTS: "muse,claude-code,codex,cursor", DATA_FILE, PUBLIC_URL: base, NOTIFY_WEBHOOK_URL: "" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   child.stdout!.on("data", d => (serverLog += d.toString()));
@@ -266,7 +266,7 @@ try {
     const { isError, data } = await call("identity.whoami");
     expect(!isError, `isError: ${JSON.stringify(data)}`);
     expect(data.owner === OWNER, `owner ${data.owner}`);
-    expect(Array.isArray(data.agents) && data.agents.some((a: any) => a.agent === "claude-code"), "default agents missing");
+    expect(Array.isArray(data.agents) && data.agents.some((a: any) => a.agent === "claude-code"), "OWNER_AGENTS seed missing");
     expect(Array.isArray(data.verbs) && data.verbs.length >= 8, "verbs missing");
   });
 
@@ -668,6 +668,29 @@ try {
     const llmPort = await freePort();
     await new Promise<void>(r => llm.listen(llmPort, "127.0.0.1", () => r()));
 
+    // Mock Cursor Cloud Agents API: create → CREATING, first poll → FINISHED with a JSON-ending result and a pushed branch.
+    const cursorCalls: string[] = [];
+    let cursorPrompt = "";
+    const cursor = createServer((req, res) => {
+      let body = "";
+      req.on("data", d => (body += d));
+      req.on("end", () => {
+        cursorCalls.push(`${req.method} ${req.url}`);
+        res.setHeader("content-type", "application/json");
+        if (req.headers.authorization !== "Bearer cur-test") return void res.writeHead(401).end(JSON.stringify({ error: "unauthorized" }));
+        if (req.method === "POST" && req.url === "/v1/agents") {
+          cursorPrompt = JSON.parse(body).prompt.text;
+          return void res.end(JSON.stringify({ agent: { id: "bc-1", url: "https://cursor.com/agents/bc-1", latestRunId: "run-1" }, run: { id: "run-1", status: "CREATING" } }));
+        }
+        if (req.method === "GET" && req.url === "/v1/agents/bc-1/runs/run-1") {
+          return void res.end(JSON.stringify({ id: "run-1", status: "FINISHED", result: "Done. Added the verb.\n\n{\"accepted\": true, \"summary\": \"added presence.status verb\"}", git: { branches: [{ repoUrl: "github.com/x/y", branch: "cursor/add-verb-ab12" }] } }));
+        }
+        res.writeHead(404).end("{}");
+      });
+    });
+    const cursorPort = await freePort();
+    await new Promise<void>(r => cursor.listen(cursorPort, "127.0.0.1", () => r()));
+
     // Fake vendor CLIs mirroring the real headless flag shapes.
     const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "relay-fakebin-"));
     const q = `q=$(printf '%s' "$prompt" | grep -o '"question": "[^"]*"' | head -1 | sed 's/"question": "//; s/"$//')`;
@@ -703,7 +726,8 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
         agents: [
           { name: "grok", key: await mintKey("grok"), preset: "api", provider: "openai", api_key: "$FAKE_LLM_KEY", base_url: `http://127.0.0.1:${llmPort}` },
           { name: "claude-code", key: "$K_CLAUDE", preset: "claude-code", cwd: root, extra_args: ["--allowedTools", "Read"] },
-          { name: "codex", key: await mintKey("codex"), preset: "codex", cwd: root, timeout_s: 30 }
+          { name: "codex", key: await mintKey("codex"), preset: "codex", cwd: root, timeout_s: 30 },
+          { name: "cursor", key: await mintKey("cursor"), preset: "cursor", api_key: "cur-test", base_url: `http://127.0.0.1:${cursorPort}`, repo: "https://github.com/x/y", poll_s: 0.2, timeout_s: 30 }
         ]
       })
     );
@@ -717,8 +741,8 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
     runner.stderr!.on("data", d => (alog += d.toString()));
     try {
       const deadline = Date.now() + 15_000;
-      while ((alog.match(/online as/g) ?? []).length < 3 && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
-      for (const n of ["grok", "claude-code", "codex"]) expect(alog.includes(`online as ${OWNER}/${n}`), `${n} not online:\n${alog}`);
+      while ((alog.match(/online as/g) ?? []).length < 4 && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
+      for (const n of ["grok", "claude-code", "codex", "cursor"]) expect(alog.includes(`online as ${OWNER}/${n}`), `${n} not online:\n${alog}`);
       await new Promise(r => setTimeout(r, 300));
 
       const t0 = Date.now();
@@ -735,17 +759,56 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
       expect(ms < 8000, `fan-out too slow: ${ms}ms`);
       expect(llmCalls.length === 1 && /untrusted_peer_note/.test(llmCalls[0].messages[0].content), "api prompt lacks the untrusted-note guard");
 
-      // A mutating verb must be left for the human, never auto-answered.
-      const d = await call("agent.send", { to: `${OWNER}/grok`, verb: "deal.propose", args: { subject: "sell bike", terms: { price: 100 } } });
-      expect(!d.isError, "deal.propose send failed");
+      // Owner delegates a task to its own cursor agent: mutating, but an own-order → runs a Cursor cloud agent and acks with summary + link note.
+      const del = await call("agent.ask", { to: `${OWNER}/cursor`, verb: "task.delegate", args: { title: "add presence.status verb", detail: "one file in src/verbs" }, timeout_s: 20 });
+      expect(!del.isError && del.data.status === "answered", `cursor task not answered: ${JSON.stringify(del.data).slice(0, 300)}\n${alog}`);
+      expect(del.data.reply.args.accepted === true && del.data.reply.args.summary === "added presence.status verb", `cursor reply args: ${JSON.stringify(del.data.reply.args)}`);
+      expect(JSON.stringify(del.data.reply.args.links) === JSON.stringify(["https://cursor.com/agents/bc-1", "github.com/x/y @ cursor/add-verb-ab12"]), `cursor reply should carry agent + branch links in args.links: ${JSON.stringify(del.data.reply.args)}`);
+      expect(cursorCalls[0] === "POST /v1/agents" && /untrusted_peer_note/.test(cursorPrompt) && /add presence.status verb/.test(cursorPrompt), `cursor API calls: ${cursorCalls.join(", ")}`);
+
+      // A mutating verb from someone other than the owner must be left for the human, never auto-answered.
+      const guest = (await (await fetch(`${base}/invites`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ handle: "stranger" }) })).json()) as any;
+      const d = await fetch(`${base}/tools/agent.send`, { method: "POST", headers: { Authorization: `Bearer ${guest.token}`, "content-type": "application/json" }, body: JSON.stringify({ to: `${OWNER}/grok`, verb: "deal.propose", args: { subject: "sell bike", terms: { price: 100 } } }) });
+      expect(d.status === 200, "deal.propose send failed");
       await new Promise(r => setTimeout(r, 800));
-      expect(/left for human/.test(alog), `runner should skip mutating verbs:\n${alog.slice(-600)}`);
+      expect(/left for human: .* deal\.propose from @stranger/.test(alog), `runner should skip mutating verbs from others:\n${alog.slice(-600)}`);
       expect(llmCalls.length === 1, "model should not have been called for a mutating verb");
     } finally {
       runner.kill("SIGTERM");
       await new Promise<void>(r => llm.close(() => r()));
+      await new Promise<void>(r => cursor.close(() => r()));
       await fs.rm(binDir, { recursive: true, force: true });
     }
+  });
+  await step(24, "Extra: owner console API — revoke one agent's keys, allowlist toggle on a peer, reset owner agents (peers untouched, survives restart)", async () => {
+    const admin = (method: string, path: string, body?: unknown) =>
+      fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }).then(async r => ({ status: r.status, json: (await r.json()) as any }));
+    const before = await admin("GET", "/agents");
+    expect(before.json.owner.agents.some((a: any) => a.name === "cursor") && before.json.owner.agents.some((a: any) => a.name === "grok"), "expected minted agents to exist");
+    // Per-agent revoke: the grok key stops working, the record stays.
+    const grokKey = ((await admin("POST", "/agents/tokens", { agent: "grok" })).json as any).token as string;
+    const rv = await admin("DELETE", "/agents/tokens/grok");
+    expect(rv.status === 200 && rv.json.revoked >= 1, `revoke: ${JSON.stringify(rv.json)}`);
+    const dead = await fetch(`${base}/tools/identity.whoami`, { method: "POST", headers: { Authorization: `Bearer ${grokKey}`, "content-type": "application/json" }, body: "{}" });
+    expect(dead.status === 401, "revoked agent key still authenticates");
+    // Peer allowlist toggle.
+    const t1 = await admin("POST", "/invites/@stranger", { allowlisted: true });
+    expect(t1.status === 200 && t1.json.allowlisted === true, `allowlist: ${JSON.stringify(t1.json)}`);
+    const t0 = await admin("POST", "/invites/@stranger", { allowlisted: false });
+    expect(t0.json.allowlisted === false, "un-allowlist failed");
+    expect((await admin("POST", "/invites/@nobody", { allowlisted: true })).status === 404, "unknown peer should 404");
+    // Reset: only `muse` and `claude-code` survive; every owner-agent key dies; peers untouched.
+    const reset = await admin("POST", "/agents/reset", { keep: ["muse", "claude-code"] });
+    expect(reset.status === 200 && reset.json.kept.join() === "muse,claude-code" && reset.json.removed.includes("cursor"), `reset: ${JSON.stringify(reset.json)}`);
+    const live = (await admin("GET", "/invites")).json.tokens.filter((t: any) => !t.revoked_at && t.handle === OWNER);
+    expect(live.length === 0, `owner-agent keys should all be revoked, ${live.length} live`);
+    const peers = (await admin("GET", "/agents")).json.peers.map((p: any) => p.handle);
+    expect(peers.includes("@stranger") && peers.includes("@friend"), `peers must survive reset: ${peers}`);
+    // Seeding must not resurrect removed agents on restart.
+    await restartServer();
+    const after = await admin("GET", "/agents");
+    expect(after.json.owner.agents.map((a: any) => a.name).sort().join() === "claude-code,muse", `agents resurrected on restart: ${after.json.owner.agents.map((a: any) => a.name)}`);
+    mcp = await connectMcp();
   });
 } finally {
   await mcp?.close().catch(() => undefined);

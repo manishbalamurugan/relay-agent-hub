@@ -10,9 +10,11 @@
  *   codex       : codex exec --output-schema <file> -o <file> <prompt>              (your ChatGPT plan)
  *   custom      : "command": [...] with {prompt} / {schema_file} placeholders; stdout must contain JSON
  *   api         : a model API directly — Anthropic, OpenAI or xAI — with an API key
+ *   cursor      : launches a Cursor Cloud Agent on a repo (api.cursor.com/v1) and returns its final reply
  *
  * Policy: non-mutating verbs (questions, availability, status, ping) are answered from anyone. Mutating
- * verbs (deals, holds, delegations) are left in the inbox for the human unless auto_decide is true.
+ * verbs (deals, holds, delegations) are answered when they come from the owner's own agents (you told your
+ * own agent to do it) and otherwise left in the inbox for the human unless auto_decide is true.
  *
  * Config: agents.json (AGENT_CONFIG to override) — see agents.example.json — or, for one agent, env only:
  *   RELAY_URL, RELAY_KEY, AGENT_NAME (default claude-code), AGENT_PRESET, AGENT_CWD, AGENT_PERSONA,
@@ -26,7 +28,8 @@ import os from "node:os";
 import path from "node:path";
 
 type Json = Record<string, unknown>;
-type Preset = "claude-code" | "codex" | "custom" | "api";
+type Preset = "claude-code" | "codex" | "custom" | "api" | "cursor";
+type Reply = { args: Json; links?: string[] };
 
 interface AgentConfig {
   name: string;
@@ -40,12 +43,17 @@ interface AgentConfig {
   extra_args?: string[];
   /** custom: full command with {prompt} and {schema_file} placeholders. */
   command?: string[];
-  /** api: provider settings. */
+  /** api / cursor: provider settings. */
   provider?: "anthropic" | "openai" | "xai";
   api_key?: string;
   model?: string;
   base_url?: string;
   web_search?: boolean;
+  /** cursor: repository the cloud agent works in (optional → no-repo agent) and starting ref. */
+  repo?: string;
+  ref?: string;
+  auto_pr?: boolean;
+  poll_s?: number;
 }
 interface Config {
   hub: string;
@@ -85,23 +93,26 @@ async function loadConfig(): Promise<Config> {
     return cfg;
   }
   if (!env("RELAY_KEY")) fail(`no ${file} and no RELAY_KEY — configure at least one agent (see agents.example.json)`);
-  const apiKey = env("LLM_API_KEY") || env("ANTHROPIC_API_KEY") || env("OPENAI_API_KEY") || env("XAI_API_KEY");
+  const preset = (env("AGENT_PRESET") || (env("CURSOR_API_KEY") ? "cursor" : env("LLM_API_KEY") || env("ANTHROPIC_API_KEY") || env("OPENAI_API_KEY") || env("XAI_API_KEY") ? "api" : "claude-code")) as Preset;
+  const apiKey = preset === "cursor" ? env("CURSOR_API_KEY") : env("LLM_API_KEY") || env("ANTHROPIC_API_KEY") || env("OPENAI_API_KEY") || env("XAI_API_KEY");
   return {
     hub: env("RELAY_URL", "http://127.0.0.1:3000").replace(/\/+$/, ""),
     agents: [
       {
         name: env("AGENT_NAME", "claude-code"),
         key: env("RELAY_KEY"),
-        preset: (env("AGENT_PRESET") || (apiKey && !env("AGENT_PRESET") ? "api" : "claude-code")) as Preset,
+        preset,
         cwd: env("AGENT_CWD") ? expandHome(env("AGENT_CWD")) : undefined,
         persona: env("AGENT_PERSONA") || undefined,
         auto_decide: env("AGENT_AUTO_DECIDE") === "true",
-        timeout_s: Number(env("AGENT_TIMEOUT_S", "300")) || 300,
+        timeout_s: Number(env("AGENT_TIMEOUT_S", preset === "cursor" ? "1800" : "300")) || 300,
         provider: (env("LLM_PROVIDER") || undefined) as AgentConfig["provider"],
         api_key: apiKey || undefined,
         model: env("LLM_MODEL") || undefined,
         base_url: env("OPENAI_BASE_URL") || undefined,
-        web_search: env("AGENT_WEB_SEARCH", "true") !== "false"
+        web_search: env("AGENT_WEB_SEARCH", "true") !== "false",
+        repo: env("AGENT_REPO_URL") || undefined,
+        ref: env("AGENT_REPO_REF") || undefined
       }
     ]
   };
@@ -246,7 +257,41 @@ async function viaApi(a: AgentConfig, p: { system: string; user: string }): Prom
   return extractJson(j.choices?.[0]?.message?.content ?? "");
 }
 
-const produce = (a: AgentConfig, p: { system: string; user: string }, schema: Json): Promise<Json> => (a.preset === "api" ? viaApi(a, p) : viaCli(a, p, schema));
+async function viaCursor(a: AgentConfig, p: { system: string; user: string }): Promise<Reply> {
+  const key = a.api_key ?? env("CURSOR_API_KEY");
+  if (!key) throw new Error(`agent ${a.name}: cursor preset needs api_key (Cursor Dashboard → API Keys)`);
+  const base = a.base_url ?? "https://api.cursor.com";
+  const headers = { Authorization: `Bearer ${key}`, "content-type": "application/json" };
+  const body: Json = { prompt: { text: `${p.system}\n\n${p.user}\n\nEnd your final message with the JSON object and nothing after it.` }, autoCreatePR: a.auto_pr ?? false };
+  if (a.repo) body.repos = [{ url: a.repo, ...(a.ref ? { startingRef: a.ref } : {}) }];
+  if (a.model) body.model = { id: a.model };
+  const created = await fetch(`${base}/v1/agents`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
+  const cj: any = await created.json();
+  if (!created.ok) throw new Error(`cursor ${created.status}: ${JSON.stringify(cj).slice(0, 300)}`);
+  const agentId: string = cj.agent?.id;
+  const runId: string = cj.run?.id ?? cj.agent?.latestRunId;
+  log(a.name, `cursor agent ${agentId} launched → ${cj.agent?.url ?? ""}`);
+  const deadline = Date.now() + (a.timeout_s ?? 1800) * 1000;
+  for (;;) {
+    await new Promise(r => setTimeout(r, (a.poll_s ?? 5) * 1000));
+    const rr = await fetch(`${base}/v1/agents/${agentId}/runs/${runId}`, { headers, signal: AbortSignal.timeout(30_000) });
+    const run: any = await rr.json();
+    if (!rr.ok) throw new Error(`cursor run ${rr.status}: ${JSON.stringify(run).slice(0, 300)}`);
+    if (["FINISHED", "ERROR", "CANCELLED", "EXPIRED"].includes(run.status)) {
+      if (run.status !== "FINISHED") throw new Error(`cursor run ended ${run.status}: ${String(run.result ?? "").slice(0, 300)}`);
+      const branches: any[] = run.git?.branches ?? [];
+      const links: string[] = [cj.agent?.url, ...branches.map(b => b.prUrl ?? (b.branch ? `${b.repoUrl} @ ${b.branch}` : undefined))].filter(Boolean);
+      return { args: extractJson(String(run.result ?? "")), links };
+    }
+    if (Date.now() > deadline) throw new Error(`cursor run ${runId} still ${run.status} after ${a.timeout_s}s`);
+  }
+}
+
+async function produce(a: AgentConfig, p: { system: string; user: string }, schema: Json): Promise<Reply> {
+  if (a.preset === "api") return { args: await viaApi(a, p) };
+  if (a.preset === "cursor") return viaCursor(a, p);
+  return { args: await viaCli(a, p, schema) };
+}
 
 // ---- loop -----------------------------------------------------------------------------------------
 
@@ -256,15 +301,19 @@ async function handle(hub: string, a: AgentConfig, me: Identity, m: any): Promis
   const from = `${m.from?.handle ?? "?"}${m.from?.agent ? "/" + m.from.agent : ""}`;
   const verb = me.verbs[m.verb];
   if (m.corr) return log(a.name, `skip ${m.id}: reply to something we sent (${m.verb} from ${from})`);
-  if (verb?.mutating && !a.auto_decide) return log(a.name, `left for human: ${m.id} ${m.verb} from ${from} is mutating (auto_decide=false)`);
+  const ownOrder = m.from?.handle === me.handle; // the owner's own agent asked — the owner already decided
+  if (verb?.mutating && !ownOrder && !a.auto_decide) return log(a.name, `left for human: ${m.id} ${m.verb} from ${from} is mutating (auto_decide=false)`);
   if (!verb?.reply_schema) return log(a.name, `skip ${m.id}: ${m.verb} has no reply schema`);
   const t0 = Date.now();
-  let args = await produce(a, prompt(me, a, m, verb.describe, verb.reply_schema), verb.reply_schema);
-  let rep = await tool(hub, a.key, "inbox.reply", { id: m.id, args });
+  // Notes strip URLs by design, so links only travel when the reply schema has a typed `links` field.
+  const withLinks = (o: Reply): Json => (o.links?.length && (verb.reply_schema!.properties as Json | undefined)?.links ? { ...o.args, links: o.links } : o.args);
+  let out = await produce(a, prompt(me, a, m, verb.describe, verb.reply_schema), verb.reply_schema);
+  let rep = await tool(hub, a.key, "inbox.reply", { id: m.id, args: withLinks(out) });
   if (rep.status === 400) {
-    args = await produce(a, prompt(me, a, m, verb.describe, verb.reply_schema, JSON.stringify(rep.json).slice(0, 600)), verb.reply_schema);
-    rep = await tool(hub, a.key, "inbox.reply", { id: m.id, args });
+    out = await produce(a, prompt(me, a, m, verb.describe, verb.reply_schema, JSON.stringify(rep.json).slice(0, 600)), verb.reply_schema);
+    rep = await tool(hub, a.key, "inbox.reply", { id: m.id, args: withLinks(out) });
   }
+  if (out.links?.length) log(a.name, `links: ${out.links.join(" · ")}`);
   if (rep.status !== 200) throw new Error(`inbox.reply → ${rep.status} ${JSON.stringify(rep.json).slice(0, 300)}`);
   stats[a.name].handled++;
   log(a.name, `answered ${m.id} (${m.verb} from ${from}) in ${((Date.now() - t0) / 1000).toFixed(1)}s`);

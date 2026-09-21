@@ -179,6 +179,49 @@ export function adminRouter(): Router {
     })
   );
 
+  // Revoke every key minted for one of the owner's agents (the agent record stays).
+  r.delete(
+    "/agents/tokens/:agent",
+    ...admin,
+    wrap(async req => {
+      const agent = slug(req.params.agent);
+      return { ok: true, agent, revoked: await store.mutate(d => revokeWhere(d, t => t.handle === d.owner.handle && t.agent === agent)) };
+    })
+  );
+
+  // Start over on the owner's side: revoke all owner-agent keys and drop agent records except `keep`. Peers untouched.
+  r.post(
+    "/agents/reset",
+    ...admin,
+    wrap(async req => {
+      const b = body(req);
+      const keep = new Set((Array.isArray(b.keep) ? b.keep.map(String) : [store.snapshot.owner.default_agent ?? "muse"]).filter(Boolean));
+      return await store.mutate(d => {
+        const revoked = revokeWhere(d, t => t.handle === d.owner.handle && !!t.agent);
+        const before = d.owner.agents.map(a => a.name);
+        d.owner.agents = d.owner.agents.filter(a => keep.has(a.name));
+        return { ok: true, revoked, removed: before.filter(n => !keep.has(n)), kept: d.owner.agents.map(a => a.name) };
+      });
+    })
+  );
+
+  // Owner edits a peer: allowlist toggle, display name.
+  r.post(
+    "/invites/:handle",
+    ...admin,
+    wrap(async req => {
+      const b = body(req);
+      const handle = normaliseHandle(String(req.params.handle));
+      return await store.mutate(d => {
+        const p = principalIn(d, handle);
+        if (!p || p === d.owner) throw new RelayError(404, `no guest ${handle}`);
+        if (typeof b.allowlisted === "boolean") p.allowlisted = b.allowlisted;
+        if (typeof b.display_name === "string") p.display_name = b.display_name.trim().slice(0, 80) || undefined;
+        return { ok: true, handle, allowlisted: Boolean(p.allowlisted), display_name: p.display_name ?? null };
+      });
+    })
+  );
+
   const redact = (a: AgentRecord) => ({ ...a, token: a.token ? "***" : undefined });
 
   r.get(

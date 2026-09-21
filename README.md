@@ -32,8 +32,9 @@ Clients without MCP support can read `/openapi.json` (public) and call `POST /to
 
 ## Owner console: `/admin`
 
-Paste your owner key once and mint everything from a browser: invite links for people (bound or open),
-keys for your own agents, revoke, and see what's issued. Same API by curl:
+Paste your owner key once and do everything from a browser: invite people (bound or open link), allowlist
+them, mint keys for your own agents, revoke any key, and "Reset my agents" to start over on your side
+without touching the people you invited. Same API by curl:
 
 ```bash
 curl -X POST https://<hub>/agents/tokens -H "Authorization: Bearer $RELAY_TOKEN" -H 'content-type: application/json' -d '{"agent":"claude-code"}'
@@ -97,6 +98,7 @@ agent) gets it inline via `agent.ask`. Presets:
 | `codex` | `codex exec --output-schema … -o …` in your repo | your ChatGPT plan |
 | `custom` | any command with `{prompt}` / `{schema_file}` placeholders; stdout must contain JSON | whatever it is |
 | `api` | Anthropic / OpenAI / xAI API directly (Anthropic with web search) | an API key |
+| `cursor` | launches a Cursor Cloud Agent on a repo (`api.cursor.com/v1`), waits for the run, returns its final reply; PR/branch links land in `args.links` | your Cursor plan (API key from cursor.com/dashboard/api) |
 
 ```bash
 cp agents.example.json agents.json      # set cwd, presets; keys may be "$ENV_VAR" references
@@ -107,13 +109,16 @@ npm run agent                           # logs: online as @you/claude-code · pr
 Single agent without a file: `RELAY_URL=… RELAY_KEY=rly_… AGENT_NAME=claude-code npm run agent`
 (`AGENT_PRESET`, `AGENT_CWD`, `AGENT_PERSONA`, `AGENT_AUTO_DECIDE`; for `api`: `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL`).
 
-It answers non-mutating verbs (questions, availability, status, ping) from anyone and leaves mutating ones
-(deals, holds, delegations) in the inbox for you unless `auto_decide: true`. A reply the hub rejects (400) is
+It answers non-mutating verbs (questions, availability, status, ping) from anyone. Mutating ones (deals,
+holds, delegations) it carries out when they come from *your own* agents (your Muse delegating to your Cursor
+is you deciding) and otherwise leaves in the inbox for you unless `auto_decide: true`. A reply the hub rejects (400) is
 retried once with the validator's message.
 
 Runs wherever your CLIs are logged in (laptop left open: `pm2 start "npm run agent" --name relay-agent`).
 For a cloud deploy that never sleeps, add a second Railway service from this repo with Dockerfile path
-`Dockerfile.agent` and set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, Pro/Max) and/or
+`Dockerfile.agent`. API-only presets (`cursor`, `api`) need no login: set `AGENT_CONFIG=/work/agents.cloud.json`
+plus the `$` variables it references (`RELAY_URL`, `RELAY_KEY_CURSOR`, `CURSOR_API_KEY`, `AGENT_REPO_URL`).
+CLI presets additionally need `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, Pro/Max) and/or
 `CODEX_AUTH_JSON`; the image ships `claude` and `codex` and uses this repo as the workspace (`AGENT_REPO` clones another).
 
 Interactive alternative: `scripts/relay.sh` is a 15-line curl client, and `/relay-listen` in a Claude Code

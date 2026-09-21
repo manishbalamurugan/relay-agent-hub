@@ -78,6 +78,11 @@ in the loop; if any is wrong, it is a small, local change.
     design (decision 1); a multi-instance deploy would swap it for a shared channel.
 20. **A reply returned inline by `agent.ask` is marked `delivered`**, so it does not also show up as a
     pending inbox item and get "answered" twice.
+23. **Own orders skip the human gate.** The hub flags every mutating verb `needs_decision`; the runner still
+    acts on them when the sender is one of the owner's *own* agents, because "my Muse told my Cursor to do X"
+    is the owner deciding. Mutating requests from other people stay parked unless `auto_decide` is set.
+24. **URLs live in typed fields, never notes.** Notes strip links by design (decision 11), so task replies carry
+    a typed `links[]`; the runner fills it from the Cursor run (agent URL, branch, PR) only when the schema has it.
 22. **Presets run vendor CLIs, not just vendor APIs.** The owner's value is in *their* agents — Claude
     Code with the repo open, Codex with its sandbox — on subscriptions they already pay for, not in a raw model.
     Claude Code's `-p --json-schema` and Codex's `exec --output-schema` both emit schema-conforming JSON, so the

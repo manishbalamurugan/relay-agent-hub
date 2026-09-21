@@ -44,14 +44,10 @@ export class Store {
     await this.flush();
   }
 
-  /** Owner handle comes from env; make sure configured agents exist as records. */
+  /** Owner handle comes from env. OWNER_AGENTS only seeds an empty store; after that the owner manages agents via /admin. */
   private seedOwner(): void {
     this.data.owner.handle = config.ownerHandle;
-    for (const name of config.ownerAgents) {
-      if (!this.data.owner.agents.some(a => a.name === name)) {
-        this.data.owner.agents.push({ name });
-      }
-    }
+    if (this.data.owner.agents.length === 0) this.data.owner.agents = config.ownerAgents.map(name => ({ name }));
   }
 
   get snapshot(): Readonly<StoreData> {
