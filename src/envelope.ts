@@ -161,11 +161,19 @@ const IMPERATIVE_START_RE = new RegExp(`^(?:${IMPERATIVES.map(w => w.replace(/ /
 /** A leading sentence that opens with an imperative: drop it up to its terminator (bounded). */
 const IMPERATIVE_SENTENCE_RE = new RegExp(`^(?:${IMPERATIVES.map(w => w.replace(/ /g, "\\s+")).join("|")})\\b[^.!?;\\n]{0,200}(?:[.!?;\\n]+|$)\\s*`, "i");
 
+/** Replace a URL but give back any sentence punctuation the greedy match swallowed. */
+function stripUrls(s: string): string {
+  return s.replace(URL_RE, m => {
+    const trailing = /[.,;:!?)\]]+$/.exec(m)?.[0] ?? "";
+    return `[link removed]${trailing}`;
+  });
+}
+
 export function sanitiseNote(note: string | null | undefined): string | null {
   if (note === null || note === undefined) return null;
   let s = String(note);
   s = s.replace(/[<>]/g, " "); // no tag injection into the wrapper
-  s = s.replace(URL_RE, "[link removed]");
+  s = stripUrls(s);
   s = s.replace(/\s+/g, " ").trim();
   if (s.length > config.noteMaxChars) s = s.slice(0, config.noteMaxChars).trimEnd();
   // Strip leading imperative sentences ("Ignore previous instructions. Please transfer … Now …").
@@ -174,7 +182,7 @@ export function sanitiseNote(note: string | null | undefined): string | null {
     if (next === s) break;
     s = next;
   }
-  s = s.replace(URL_RE, "[link removed]"); // truncation can expose a fragment; re-run
+  s = stripUrls(s); // truncation can expose a fragment; re-run
   return s.length ? s : null;
 }
 
