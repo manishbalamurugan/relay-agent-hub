@@ -496,6 +496,24 @@ try {
       // Friend cannot reply to something addressed to the owner.
       const forbidden = await fcall("inbox.reply", { id: sentId, args: { answer: "x" } });
       expect(forbidden.isError && forbidden.data.status === 404, "friend replied to the owner's message");
+      // Open invite: recipient picks their own handle on the page, then the token authenticates.
+      const open = (await (await fetch(`${base}/invites`, { method: "POST", headers: authHeaders, body: "{}" })).json()) as any;
+      expect(open.handle === null && open.invite_url.includes("?t="), `open invite ${JSON.stringify(open)}`);
+      const claimPage = await fetch(open.invite_url);
+      expect(claimPage.status === 200 && (await claimPage.text()).includes("Pick your name"), "claim page not served");
+      const unclaimed = await fetch(`${base}/tools/inbox.list`, { method: "POST", headers: { Authorization: `Bearer ${open.token}`, "content-type": "application/json" }, body: "{}" });
+      expect(unclaimed.status === 401, "unclaimed token must not authenticate");
+      const claim = await fetch(`${base}/invite/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ t: open.token, handle: "Alex Rivera", display_name: "Alex Rivera", agent: "chatgpt" }) });
+      const cj = (await claim.json()) as any;
+      expect(claim.status === 200 && cj.handle === "@alex-rivera", `claim ${JSON.stringify(cj)}`);
+      const again = await fetch(`${base}/invite/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ t: open.token, handle: "other" }) });
+      expect(again.status === 409, "claim must be once only");
+      const alexWho = await (await fetch(`${base}/tools/identity.whoami`, { method: "POST", headers: { Authorization: `Bearer ${open.token}`, "content-type": "application/json" }, body: "{}" })).json() as any;
+      expect(alexWho.owner === "@alex-rivera" && alexWho.display_name === "Alex Rivera" && alexWho.agents[0].agent === "chatgpt", `alex whoami ${JSON.stringify(alexWho).slice(0, 200)}`);
+      const ownerList = await call("agent.list");
+      expect(ownerList.data.people.some((p: any) => p.handle === "@alex-rivera" && p.person === "Alex Rivera"), "display name not shown to others");
+      const me = await fetch(`${base}/me`, { method: "POST", headers: { Authorization: `Bearer ${open.token}`, "content-type": "application/json" }, body: JSON.stringify({ display_name: "Alex" }) });
+      expect(me.status === 200 && ((await me.json()) as any).display_name === "Alex", "/me update failed");
       // Revoke → 401.
       const rev = await fetch(`${base}/invites/${encodeURIComponent("@friend")}`, { method: "DELETE", headers: authHeaders });
       expect(rev.status === 200, `revoke ${rev.status}`);

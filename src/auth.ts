@@ -52,7 +52,7 @@ export function checkToken(token: string | undefined): Caller | null {
   if (safeEqual(token, config.token)) return { handle: owner, admin: true };
   for (const [tok, name] of agentTokens) if (safeEqual(token, tok)) return { handle: owner, agent: name, admin: true };
   const rec = store.snapshot.tokens[hashToken(token)];
-  if (rec && !rec.revoked_at) return { handle: rec.handle, agent: rec.agent, admin: false };
+  if (rec && !rec.revoked_at && rec.handle) return { handle: rec.handle, agent: rec.agent, admin: false };
   return null;
 }
 

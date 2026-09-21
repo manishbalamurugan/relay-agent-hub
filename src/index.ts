@@ -30,6 +30,29 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 }
 
+function claimHandle(raw: string): string {
+  const cleaned = raw.trim().toLowerCase().replace(/^@+/, "").replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  if (cleaned.length < 2) throw new RelayError(400, "handle must be at least 2 characters (letters, digits, . _ -)");
+  const handle = `@${cleaned}`;
+  if (handle === store.snapshot.owner.handle) throw new RelayError(400, "that is the hub owner's handle");
+  return handle;
+}
+
+/** Create/extend a peer principal and bind a token to it. Runs inside store.mutate. */
+function bindToken(d: import("./types.js").StoreData, token: string, handle: string, agents: string[], displayName: string | undefined, label: string | undefined, allowlisted: boolean): void {
+  let p = d.peers.find(x => x.handle === handle);
+  if (!p) {
+    p = { handle, agents: [], invited_at: new Date().toISOString(), allowlisted };
+    d.peers.push(p);
+  }
+  if (displayName) p.display_name = displayName;
+  p.connected_at ??= new Date().toISOString();
+  for (const name of agents) if (!p.agents.some(a => a.name === name)) p.agents.push({ name });
+  const existing = d.tokens[hashToken(token)];
+  d.tokens[hashToken(token)] = { ...(existing ?? { created_at: new Date().toISOString() }), handle, label };
+  for (const e of d.envelopes) if (e.state === "pending_invite" && e.to.handle === handle) e.state = "queued";
+}
+
 function connectBlock(token: string): string {
   return [
     `Connect to Relay. MCP server: ${baseUrl()}/mcp`,
@@ -101,6 +124,11 @@ export function createApp() {
       const handle = normaliseHandle(String(req.query.h ?? "").slice(0, 120) || "@friend");
       const t = typeof req.query.t === "string" ? req.query.t : "";
       const rec = t ? store.snapshot.tokens[hashToken(t)] : undefined;
+      if (rec && !rec.revoked_at && rec.handle === "") {
+        const html = (await renderTemplate("claim.html", { BASE_URL: baseUrl(), OWNER: store.snapshot.owner.handle })).replace("{{TOKEN_JSON}}", JSON.stringify(t));
+        res.type("html").send(html);
+        return;
+      }
       if (rec && !rec.revoked_at && rec.handle === handle) {
         const html = await renderTemplate("joined.html", { BASE_URL: baseUrl(), MCP_URL: `${baseUrl()}/mcp`, OWNER: store.snapshot.owner.handle, HANDLE: handle, TOKEN: t, CONNECT_BLOCK: connectBlock(t) });
         res.type("html").send(html);
@@ -141,21 +169,21 @@ export function createApp() {
   app.post("/invites", requireBearer, requireAdmin, async (req, res, next) => {
     try {
       const b = (req.body ?? {}) as Record<string, unknown>;
-      const handle = normaliseHandle(String(b.handle ?? "").slice(0, 120));
-      if (handle.length < 2) throw new RelayError(400, "handle is required, e.g. @friend");
-      if (handle === store.snapshot.owner.handle) throw new RelayError(400, "that is the hub owner; use RELAY_TOKEN");
-      const agents = Array.isArray(b.agents) ? (b.agents as unknown[]).map(String).filter(Boolean) : ["muse"];
+      const wantsHandle = typeof b.handle === "string" && b.handle.trim().length > 0;
       const token = `rly_${randomBytes(24).toString("base64url")}`;
-      await store.mutate(d => {
-        let p = d.peers.find(x => x.handle === handle);
-        if (!p) {
-          p = { handle, agents: [], invited_at: new Date().toISOString(), allowlisted: Boolean(b.allowlisted) };
-          d.peers.push(p);
-        }
-        for (const name of agents) if (!p.agents.some(a => a.name === name)) p.agents.push({ name });
-        d.tokens[hashToken(token)] = { handle, label: typeof b.label === "string" ? b.label : undefined, created_at: new Date().toISOString() };
-        for (const e of d.envelopes) if (e.state === "pending_invite" && e.to.handle === handle) e.state = "queued";
-      });
+      const label = typeof b.label === "string" ? b.label : undefined;
+      if (!wantsHandle) {
+        // Open invite: the recipient picks their own name on the invite page.
+        await store.mutate(d => {
+          d.tokens[hashToken(token)] = { handle: "", label, created_at: new Date().toISOString() };
+        });
+        const inviteUrl = `${baseUrl()}/invite?t=${encodeURIComponent(token)}`;
+        res.json({ ok: true, handle: null, token, invite_url: inviteUrl, note: "Open invite: send invite_url; the person chooses their handle and display name when they open it." });
+        return;
+      }
+      const handle = claimHandle(String(b.handle));
+      const agents = Array.isArray(b.agents) ? (b.agents as unknown[]).map(String).filter(Boolean) : ["muse"];
+      await store.mutate(d => bindToken(d, token, handle, agents, typeof b.display_name === "string" ? b.display_name : undefined, label, Boolean(b.allowlisted)));
       const inviteUrl = `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(token)}`;
       res.json({
         ok: true,
@@ -163,8 +191,46 @@ export function createApp() {
         token,
         invite_url: inviteUrl,
         connect_block: connectBlock(token),
-        note: "Send invite_url to the person (it contains their token). Their agents then call the same six tools as @" + handle.slice(1) + "."
+        note: "Send invite_url to the person (it contains their token). Their agents then call the same six tools as " + handle + "."
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Public: the recipient of an open invite claims a handle. Token in body proves possession of the invite.
+  app.post("/invite/claim", async (req, res, next) => {
+    try {
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const t = String(b.t ?? "");
+      const rec = store.snapshot.tokens[hashToken(t)];
+      if (!rec || rec.revoked_at) throw new RelayError(404, "invite not found or revoked");
+      if (rec.handle) throw new RelayError(409, "invite already claimed", { handle: rec.handle });
+      const handle = claimHandle(String(b.handle ?? ""));
+      const agent = String(b.agent ?? "muse").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 40) || "muse";
+      const displayName = typeof b.display_name === "string" ? b.display_name.trim().slice(0, 80) : undefined;
+      await store.mutate(d => bindToken(d, t, handle, [agent], displayName, rec.label, false));
+      res.json({ ok: true, handle, next: `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(t)}` });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Any authenticated principal can update its own profile.
+  app.post("/me", requireBearer, async (req, res, next) => {
+    try {
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const caller = getCaller(req);
+      const out = await store.mutate(d => {
+        const p = d.owner.handle === caller.handle ? d.owner : d.peers.find(x => x.handle === caller.handle);
+        if (!p) throw new RelayError(404, "principal not found");
+        if (typeof b.display_name === "string") p.display_name = b.display_name.trim().slice(0, 80) || undefined;
+        if (Array.isArray(b.agents)) {
+          for (const name of (b.agents as unknown[]).map(String).filter(Boolean)) if (!p.agents.some(a => a.name === name)) p.agents.push({ name });
+        }
+        return { handle: p.handle, display_name: p.display_name ?? null, agents: p.agents.map(a => a.name) };
+      });
+      res.json({ ok: true, ...out });
     } catch (err) {
       next(err);
     }

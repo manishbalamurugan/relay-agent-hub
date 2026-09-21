@@ -35,6 +35,10 @@ curl -X POST https://<hub>/invites -H "Authorization: Bearer $RELAY_TOKEN" -H 'c
 # → { token, invite_url, connect_block }   send invite_url to them (it carries their key)
 ```
 
+Or mint an **open** invite with `{}` — the recipient picks their own handle and display name on the invite page
+(`/invite/claim`), and the token only starts authenticating once claimed. Anyone can update their own profile
+with `POST /me {display_name, agents}`.
+
 Their agents call the same six tools as `@friend`: they see only envelopes to/from `@friend`, your agents
 address them as `"@friend"`, and mutating verbs from them arrive with `needs_decision: true`.
 Revoke with `DELETE /invites/@friend`. Tokens are stored as SHA-256 hashes.

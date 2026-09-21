@@ -60,7 +60,8 @@ export function buildTools(): ToolDef[] {
 
   function agentView(handle: string, a: { name: string; endpoint_url?: string; last_seen?: string }, kind: "own" | "peer") {
     const reachable = Boolean(dispatcher.resolve({ handle, agent: a.name }).mode === "sync");
-    return { handle, agent: a.name, kind, can_answer_now: reachable, delivery: reachable ? "sync" : "inbox (polled)", last_seen: a.last_seen ?? null };
+    const person = store.findPrincipal(handle)?.display_name ?? null;
+    return { handle, person, agent: a.name, kind, can_answer_now: reachable, delivery: reachable ? "sync" : "inbox (polled)", last_seen: a.last_seen ?? null };
   }
 
   function inboundFor(e: StoredEnvelope, handle: string, forAgent?: string): boolean {
@@ -85,7 +86,8 @@ export function buildTools(): ToolDef[] {
         acting_as: ctx.agent ?? "unknown",
         role: ctx.admin ? "hub owner" : "guest on " + d.owner.handle + "'s hub",
         agents: (me?.agents ?? []).map(a => agentView(ctx.handle, a, "own")),
-        peers: others.map(p => ({ handle: p.handle, allowlisted: Boolean(p.allowlisted), agents: p.agents.map(a => agentView(p.handle, a, "peer")) })),
+        display_name: me?.display_name ?? null,
+        peers: others.map(p => ({ handle: p.handle, person: p.display_name ?? null, allowlisted: Boolean(p.allowlisted), agents: p.agents.map(a => agentView(p.handle, a, "peer")) })),
         verbs: listVerbs().map(v => ({
           verb: v.verb,
           describe: v.describe,
@@ -108,7 +110,7 @@ export function buildTools(): ToolDef[] {
       const d = store.snapshot;
       const all = [d.owner, ...d.peers];
       const agents = all.flatMap(p => p.agents.map(a => agentView(p.handle, a, p.handle === ctx.handle ? "own" : "peer")));
-      const people = all.filter(p => p.handle !== ctx.handle).map(p => ({ handle: p.handle, agents: p.agents.length, allowlisted: Boolean(p.allowlisted), connected: Boolean(p.connected_at) }));
+      const people = all.filter(p => p.handle !== ctx.handle).map(p => ({ handle: p.handle, person: p.display_name ?? null, agents: p.agents.length, allowlisted: Boolean(p.allowlisted), connected: Boolean(p.connected_at) }));
       return { owner: ctx.handle, hub_owner: d.owner.handle, agents, people };
     }
   };

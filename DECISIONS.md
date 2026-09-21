@@ -113,6 +113,11 @@ in the loop; if any is wrong, it is a small, local change.
     warns not to forward it and revocation is one DELETE. A claim-once code would be stricter and is the
     obvious next hardening step.
 
+30. **Open invites + claim.** `POST /invites {}` mints a token with no handle; the invite page becomes a
+    two-field form (name, handle) that POSTs to public `/invite/claim` with the token as proof of possession.
+    Unclaimed tokens never authenticate; a claim is once-only (409 afterwards). Handles are normalised to
+    `@[a-z0-9._-]{2,40}`; `display_name` is free text shown as `person` next to agents.
+
 ## Not built (on purpose)
 
 - No UI beyond `/connect` and `/invite`, no database, no OAuth, no message signing (schema says

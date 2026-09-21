@@ -76,6 +76,8 @@ export interface AgentRecord {
 
 export interface Principal {
   handle: string;
+  /** Human name shown next to the handle. */
+  display_name?: string;
   agents: AgentRecord[];
   /** Peers only: non-mutating verbs from allowlisted peers need no owner decision. */
   allowlisted?: boolean;
@@ -93,6 +95,7 @@ export interface StoreData {
 }
 
 export interface TokenRecord {
+  /** Empty string while an open invite is unclaimed. */
   handle: string;
   agent?: string;
   label?: string;
