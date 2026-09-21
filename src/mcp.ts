@@ -56,6 +56,8 @@ export function createMcpServer(ctx: ToolContext): McpServer {
 interface Session {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
+  /** Mutated in place on every request so tools always see the current caller identity. */
+  ctx: ToolContext;
   lastSeen: number;
 }
 
@@ -84,6 +86,7 @@ export async function handleMcp(req: Request, res: Response, ctx: ToolContext): 
     const session = sessions.get(sessionId);
     if (session) {
       session.lastSeen = Date.now();
+      Object.assign(session.ctx, ctx);
       await session.transport.handleRequest(req, res, body);
       return;
     }
@@ -95,17 +98,18 @@ export async function handleMcp(req: Request, res: Response, ctx: ToolContext): 
   }
 
   if (req.method === "POST" && isInitializeRequest(body)) {
+    const sessionCtx: ToolContext = { ...ctx };
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       enableJsonResponse: true,
       onsessioninitialized: id => {
-        sessions.set(id, { transport, server, lastSeen: Date.now() });
+        sessions.set(id, { transport, server, ctx: sessionCtx, lastSeen: Date.now() });
       },
       onsessionclosed: id => {
         sessions.delete(id);
       }
     });
-    const server = createMcpServer(ctx);
+    const server = createMcpServer(sessionCtx);
     transport.onclose = () => {
       if (transport.sessionId) sessions.delete(transport.sessionId);
     };

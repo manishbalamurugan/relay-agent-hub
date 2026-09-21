@@ -19,6 +19,8 @@ export const config = {
    */
   publicUrl: (process.env.PUBLIC_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "")).replace(/\/+$/, ""),
   ownerHandle: normaliseHandle(process.env.OWNER_HANDLE || "@owner"),
+  /** Agent the bare RELAY_TOKEN acts as when the caller does not say (store setting overrides). */
+  ownerTokenAgent: process.env.RELAY_TOKEN_AGENT || "",
   ownerAgents: (process.env.OWNER_AGENTS || "muse,claude-code,codex,cursor")
     .split(",")
     .map(s => s.trim())

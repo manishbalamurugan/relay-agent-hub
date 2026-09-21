@@ -534,6 +534,12 @@ try {
       expect(ownerRot.status === 200, `owner rotate ${ownerRot.status}`);
       const newDead = await fetch(`${base}/tools/inbox.list`, { method: "POST", headers: { Authorization: `Bearer ${rj.token}`, "content-type": "application/json" }, body: "{}" });
       expect(newDead.status === 401, "owner rotation did not revoke guest key");
+      // Owner key default agent: set via /me, then unattributed sends come from that agent.
+      const setDef = await fetch(`${base}/me`, { method: "POST", headers: authHeaders, body: JSON.stringify({ default_agent: "muse" }) });
+      expect(setDef.status === 200 && ((await setDef.json()) as any).default_agent === "muse", "default_agent not set");
+      const anon = await call("agent.send", { to: "cursor", verb: "presence.ping", args: {} });
+      const anonStored = await call("inbox.list", { filter: { id: anon.data.id } });
+      expect(anonStored.data.messages[0]?.from.agent === "muse", `default agent not applied: ${anonStored.data.messages[0]?.from.agent}`);
       // Owner-agent key: acts as @owner/chatgpt, non-admin, inbox defaults to that agent's messages.
       const ak = (await (await fetch(`${base}/agents/tokens`, { method: "POST", headers: authHeaders, body: JSON.stringify({ agent: "ChatGPT" }) })).json()) as any;
       expect(ak.token?.startsWith("rly_") && ak.agent === "chatgpt", `agent token ${JSON.stringify(ak)}`);

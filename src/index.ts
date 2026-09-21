@@ -270,10 +270,15 @@ export function createApp() {
         const p = d.owner.handle === caller.handle ? d.owner : d.peers.find(x => x.handle === caller.handle);
         if (!p) throw new RelayError(404, "principal not found");
         if (typeof b.display_name === "string") p.display_name = b.display_name.trim().slice(0, 80) || undefined;
+        if (typeof b.default_agent === "string") {
+          const name = b.default_agent.trim().toLowerCase().slice(0, 40);
+          p.default_agent = name || undefined;
+          if (name && !p.agents.some(a => a.name === name)) p.agents.push({ name });
+        }
         if (Array.isArray(b.agents)) {
           for (const name of (b.agents as unknown[]).map(String).filter(Boolean)) if (!p.agents.some(a => a.name === name)) p.agents.push({ name });
         }
-        return { handle: p.handle, display_name: p.display_name ?? null, agents: p.agents.map(a => a.name) };
+        return { handle: p.handle, display_name: p.display_name ?? null, default_agent: p.default_agent ?? null, agents: p.agents.map(a => a.name) };
       });
       res.json({ ok: true, ...out });
     } catch (err) {

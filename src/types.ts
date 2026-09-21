@@ -76,6 +76,8 @@ export interface AgentRecord {
 
 export interface Principal {
   handle: string;
+  /** Agent name assumed when a key for this principal is not bound to one (e.g. the owner's RELAY_TOKEN). */
+  default_agent?: string;
   /** Human name shown next to the handle. */
   display_name?: string;
   agents: AgentRecord[];

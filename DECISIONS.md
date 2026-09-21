@@ -136,6 +136,12 @@ in the loop; if any is wrong, it is a small, local change.
     The brief warned OAuth servers are a failure mode; this is deliberately the thinnest possible one, and the
     static bearer path is untouched and still preferred.
 
+34. **Owner key default agent + live session context.** The bare RELAY_TOKEN now acts as
+    `owner.default_agent` (set via `POST /me {default_agent}` or `RELAY_TOKEN_AGENT`) when the caller does
+    not pass `from_agent`, so Muse's sends are attributed instead of `unknown`. Found while adding it: MCP
+    sessions captured caller context at `initialize`; the context object is now updated in place on every
+    request so key rotation / profile changes apply without reconnecting.
+
 ## Not built (on purpose)
 
 - No UI beyond `/connect` and `/invite`, no database, no OAuth, no message signing (schema says
