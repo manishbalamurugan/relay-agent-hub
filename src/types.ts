@@ -88,6 +88,17 @@ export interface StoreData {
   peers: Principal[];
   envelopes: StoredEnvelope[];
   invites: Record<string, { handle: string; created_at: string; code: string }>;
+  /** sha256(token) -> who it acts for. Minted via POST /invites. */
+  tokens: Record<string, TokenRecord>;
+}
+
+export interface TokenRecord {
+  handle: string;
+  agent?: string;
+  label?: string;
+  created_at: string;
+  last_used_at?: string;
+  revoked_at?: string;
 }
 
 export interface Transport {

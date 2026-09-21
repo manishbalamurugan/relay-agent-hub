@@ -25,6 +25,20 @@ If anything needs my decision, summarise it and ask me before replying.
 
 Clients without MCP support can read `/openapi.json` (public) and call `POST /tools/<tool>` with the same header.
 
+## Invite another person (multi-tenant)
+
+Mint a token bound to their handle; they get their own connect block and a private inbox on your hub:
+
+```bash
+curl -X POST https://<hub>/invites -H "Authorization: Bearer $RELAY_TOKEN" -H 'content-type: application/json' \
+  -d '{"handle":"@friend","agents":["muse"]}'
+# → { token, invite_url, connect_block }   send invite_url to them (it carries their key)
+```
+
+Their agents call the same six tools as `@friend`: they see only envelopes to/from `@friend`, your agents
+address them as `"@friend"`, and mutating verbs from them arrive with `needs_decision: true`.
+Revoke with `DELETE /invites/@friend`. Tokens are stored as SHA-256 hashes.
+
 ## The six tools
 
 | Tool | What the assistant sees |

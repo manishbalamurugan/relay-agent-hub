@@ -13,8 +13,12 @@ import { ENVELOPE_KINDS, RelayError } from "./types.js";
 import type { EnvelopeKind, Party, StoredEnvelope } from "./types.js";
 
 export interface ToolContext {
-  /** Owner's agent the caller is acting as, when known from the token or X-Relay-Agent header. */
+  /** Principal the caller acts for (hub owner or an invited peer). */
+  handle: string;
+  /** Agent the caller is acting as, when known from the token or X-Relay-Agent header. */
   agent?: string;
+  /** Hub owner tokens only. */
+  admin: boolean;
 }
 
 export interface ToolDef<Shape extends z.ZodRawShape = z.ZodRawShape> {
@@ -59,8 +63,8 @@ export function buildTools(): ToolDef[] {
     return { handle, agent: a.name, kind, can_answer_now: reachable, delivery: reachable ? "sync" : "inbox (polled)", last_seen: a.last_seen ?? null };
   }
 
-  function inboundFor(e: StoredEnvelope, forAgent?: string): boolean {
-    if (e.to.handle !== store.snapshot.owner.handle) return false;
+  function inboundFor(e: StoredEnvelope, handle: string, forAgent?: string): boolean {
+    if (e.to.handle !== handle) return false;
     if (!forAgent) return true;
     return e.to.agent === "*" || e.to.agent === forAgent;
   }
@@ -74,11 +78,14 @@ export function buildTools(): ToolDef[] {
     readOnly: true,
     async handler(_args, ctx) {
       const d = store.snapshot;
+      const me = store.findPrincipal(ctx.handle);
+      const others = [d.owner, ...d.peers].filter(p => p.handle !== ctx.handle);
       return {
-        owner: d.owner.handle,
+        owner: ctx.handle,
         acting_as: ctx.agent ?? "unknown",
-        agents: d.owner.agents.map(a => agentView(d.owner.handle, a, "own")),
-        peers: d.peers.map(p => ({ handle: p.handle, allowlisted: Boolean(p.allowlisted), agents: p.agents.map(a => agentView(p.handle, a, "peer")) })),
+        role: ctx.admin ? "hub owner" : "guest on " + d.owner.handle + "'s hub",
+        agents: (me?.agents ?? []).map(a => agentView(ctx.handle, a, "own")),
+        peers: others.map(p => ({ handle: p.handle, allowlisted: Boolean(p.allowlisted), agents: p.agents.map(a => agentView(p.handle, a, "peer")) })),
         verbs: listVerbs().map(v => ({
           verb: v.verb,
           describe: v.describe,
@@ -97,14 +104,12 @@ export function buildTools(): ToolDef[] {
     description: "List the user's other AI agents and connected people, and whether each can answer immediately.",
     input: {},
     readOnly: true,
-    async handler() {
+    async handler(_args, ctx) {
       const d = store.snapshot;
-      const agents = [
-        ...d.owner.agents.map(a => agentView(d.owner.handle, a, "own")),
-        ...d.peers.flatMap(p => p.agents.map(a => agentView(p.handle, a, "peer")))
-      ];
-      const people = d.peers.map(p => ({ handle: p.handle, agents: p.agents.length, allowlisted: Boolean(p.allowlisted), connected: Boolean(p.connected_at) }));
-      return { owner: d.owner.handle, agents, people };
+      const all = [d.owner, ...d.peers];
+      const agents = all.flatMap(p => p.agents.map(a => agentView(p.handle, a, p.handle === ctx.handle ? "own" : "peer")));
+      const people = all.filter(p => p.handle !== ctx.handle).map(p => ({ handle: p.handle, agents: p.agents.length, allowlisted: Boolean(p.allowlisted), connected: Boolean(p.connected_at) }));
+      return { owner: ctx.handle, hub_owner: d.owner.handle, agents, people };
     }
   };
 
@@ -128,8 +133,8 @@ export function buildTools(): ToolDef[] {
       if (!verb) throw new RelayError(400, `unknown verb '${a.verb ?? "(none)"}'`, { known_verbs: verbNames() });
       const args: Record<string, unknown> = { ...(a.args ?? {}) };
       if (a.question && verb.textField && args[verb.textField] === undefined) args[verb.textField] = a.question;
-      const from: Party = { handle: store.snapshot.owner.handle, agent: actingAgent(a.from_agent, ctx) };
-      const env = validate(draft({ from, to: dispatcher.parseTarget(a.to), verb: verb.verb, args, note: a.note ?? null }));
+      const from: Party = { handle: ctx.handle, agent: actingAgent(a.from_agent, ctx) };
+      const env = validate(draft({ from, to: dispatcher.parseTarget(a.to, ctx.handle), verb: verb.verb, args, note: a.note ?? null }));
       const timeoutMs = Math.min(a.timeout_s ?? config.askDefaultTimeoutS, config.askMaxTimeoutS) * 1000;
       return dispatcher.ask(env, timeoutMs);
     }
@@ -144,7 +149,7 @@ export function buildTools(): ToolDef[] {
     corr: z.string().optional().describe("Id of the envelope this relates to, if any."),
     expires: z.string().optional().describe("RFC 3339 date-time after which the message is dropped unread. Default: 24h."),
     from_agent: fromAgentField,
-    from_handle: z.string().min(1).optional().describe("Only for hub-to-hub forwarding: the original sender's handle.")
+    from_handle: z.string().min(1).optional().describe("Hub owner only, for hub-to-hub forwarding: the original sender's handle.")
   };
 
   const agentSend: ToolDef<typeof sendShape> = {
@@ -153,9 +158,9 @@ export function buildTools(): ToolDef[] {
     input: sendShape,
     readOnly: false,
     async handler(a, ctx) {
-      const from: Party = { handle: a.from_handle ? dispatcher.normaliseHandle(a.from_handle) : store.snapshot.owner.handle, agent: actingAgent(a.from_agent, ctx) };
+      const from: Party = { handle: a.from_handle && ctx.admin ? dispatcher.normaliseHandle(a.from_handle) : ctx.handle, agent: actingAgent(a.from_agent, ctx) };
       const env = validate(
-        draft({ from, to: dispatcher.parseTarget(a.to), verb: a.verb, args: a.args ?? {}, note: a.note ?? null, kind: a.kind, corr: a.corr ?? null, expires: a.expires })
+        draft({ from, to: dispatcher.parseTarget(a.to, ctx.handle), verb: a.verb, args: a.args ?? {}, note: a.note ?? null, kind: a.kind, corr: a.corr ?? null, expires: a.expires })
       );
       return dispatcher.send(env);
     }
@@ -182,18 +187,20 @@ export function buildTools(): ToolDef[] {
     description: "Check for messages from other agents that are waiting for a response.",
     input: listShape,
     readOnly: true,
-    async handler(a) {
+    async handler(a, ctx) {
       if (store.sweepExpired()) await store.mutate(() => undefined);
       const f = a.filter ?? {};
       const state = f.state ?? "queued";
       const direction = f.direction ?? "inbound";
       const since = a.since ? Date.parse(a.since) : NaN;
-      const owner = store.snapshot.owner.handle;
+      const me = ctx.handle;
       let list = store.snapshot.envelopes.filter(e => {
+        // A principal only ever sees envelopes it sent or received.
+        if (e.to.handle !== me && e.from.handle !== me) return false;
         if (f.id) return e.id === f.id;
         if (state !== "all" && e.state !== state) return false;
-        if (direction === "inbound" && !inboundFor(e, f.for_agent)) return false;
-        if (direction === "outbound" && e.to.handle === owner) return false;
+        if (direction === "inbound" && !inboundFor(e, me, f.for_agent)) return false;
+        if (direction === "outbound" && e.from.handle !== me) return false;
         if (f.verb && e.verb !== f.verb) return false;
         if (f.from_handle && e.from.handle !== dispatcher.normaliseHandle(f.from_handle)) return false;
         if (f.needs_decision !== undefined && e.needs_decision !== f.needs_decision) return false;
@@ -229,13 +236,12 @@ export function buildTools(): ToolDef[] {
     readOnly: false,
     async handler(a, ctx) {
       const original = store.getEnvelope(a.id);
-      if (!original) throw new RelayError(404, `no message with id '${a.id}'`);
+      if (!original || original.to.handle !== ctx.handle) throw new RelayError(404, `no message with id '${a.id}' addressed to ${ctx.handle}`);
       const verbName = a.verb ?? original.verb;
       const verb = getVerb(verbName);
       if (!verb) throw new RelayError(400, `unknown verb '${verbName}'`, { known_verbs: verbNames() });
-      const owner = store.snapshot.owner.handle;
-      const fromAgent = a.from_agent?.trim() || (original.to.handle === owner && original.to.agent !== "*" ? original.to.agent : undefined) || ctx.agent || "unknown";
-      const from: Party = { handle: owner, agent: fromAgent };
+      const fromAgent = a.from_agent?.trim() || (original.to.agent !== "*" ? original.to.agent : undefined) || ctx.agent || "unknown";
+      const from: Party = { handle: ctx.handle, agent: fromAgent };
       const reply = validate(
         draft({ from, to: original.from, verb: verbName, args: a.args ?? {}, note: a.note ?? null, corr: original.id, kind: replyKindFor(verb, original.kind) })
       );

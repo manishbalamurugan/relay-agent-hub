@@ -457,6 +457,54 @@ try {
     const missing = await rest("inbox.reply", { id: "env_doesnotexist000", args: { answer: "x" } });
     expect(missing.status === 404, `unknown id status ${missing.status}`);
   });
+  await step(20, "Extra: invite a friend → scoped token, own inbox, deal round-trip both ways", async () => {
+    const inv = await fetch(`${base}/invites`, { method: "POST", headers: authHeaders, body: JSON.stringify({ handle: "@friend", agents: ["muse"] }) });
+    expect(inv.status === 200, `invite status ${inv.status}`);
+    const j = (await inv.json()) as any;
+    expect(j.token?.startsWith("rly_") && j.invite_url.includes("t=rly_"), `bad invite ${JSON.stringify(j)}`);
+    const page = await fetch(j.invite_url);
+    expect(page.status === 200 && (await page.text()).includes(`Authorization: Bearer ${j.token}`), "invite page did not render the friend's connect block");
+    const raw = JSON.parse(await fs.readFile(DATA_FILE, "utf8"));
+    expect(!JSON.stringify(raw.tokens).includes(j.token), "token stored in plain text");
+    // Friend connects over MCP with their own token.
+    const ft = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${j.token}` } } });
+    const friend = new Client({ name: "friend-muse", version: "0" });
+    await friend.connect(ft);
+    const fcall = async (name: string, args: Record<string, unknown> = {}) => {
+      const r = (await friend.callTool({ name, arguments: args })) as any;
+      return { isError: Boolean(r.isError), data: JSON.parse(r.content[0].text) };
+    };
+    try {
+      const who = await fcall("identity.whoami");
+      expect(who.data.owner === "@friend" && who.data.peers.some((p: any) => p.handle === OWNER), `friend whoami ${JSON.stringify(who.data).slice(0, 200)}`);
+      const fin = await fcall("inbox.list", { filter: { state: "all", direction: "all" } });
+      expect(fin.data.total === 0, `friend can see ${fin.data.total} of the owner's envelopes`);
+      const noAdmin = await fetch(`${base}/agents`, { headers: { Authorization: `Bearer ${j.token}` } });
+      expect(noAdmin.status === 403, `guest reached admin route: ${noAdmin.status}`);
+      // Owner proposes a deal to the friend.
+      const prop = await call("agent.send", { to: "@friend", verb: "deal.propose", args: { subject: "bike", terms: { price: 300, currency: "USD", pickup: "Saturday" } }, from_agent: "muse" });
+      expect(!prop.isError && prop.data.status === "queued", `propose ${JSON.stringify(prop.data)}`);
+      const finbox = await fcall("inbox.list");
+      const deal = finbox.data.messages.find((m: any) => m.id === prop.data.id);
+      expect(deal && deal.needs_decision === true && deal.from.handle === OWNER, `deal not in friend inbox: ${JSON.stringify(finbox.data).slice(0, 300)}`);
+      // Friend counters; the counter must land in the owner's inbox with corr set.
+      const counter = await fcall("inbox.reply", { id: deal.id, verb: "deal.respond", args: { deal_id: deal.id, decision: "counter", terms: { price: 250, currency: "USD", pickup: "Saturday" } } });
+      expect(!counter.isError && counter.data.corr === deal.id, `counter ${JSON.stringify(counter.data)}`);
+      const mine = await call("inbox.list", { filter: { for_agent: "muse" } });
+      const got = mine.data.messages.find((m: any) => m.id === counter.data.reply.id);
+      expect(got && got.from.handle === "@friend" && got.args.decision === "counter", "counter not delivered to owner");
+      // Friend cannot reply to something addressed to the owner.
+      const forbidden = await fcall("inbox.reply", { id: sentId, args: { answer: "x" } });
+      expect(forbidden.isError && forbidden.data.status === 404, "friend replied to the owner's message");
+      // Revoke → 401.
+      const rev = await fetch(`${base}/invites/${encodeURIComponent("@friend")}`, { method: "DELETE", headers: authHeaders });
+      expect(rev.status === 200, `revoke ${rev.status}`);
+      const dead = await fetch(`${base}/tools/inbox.list`, { method: "POST", headers: { Authorization: `Bearer ${j.token}`, "content-type": "application/json" }, body: "{}" });
+      expect(dead.status === 401, `revoked token still works: ${dead.status}`);
+    } finally {
+      await friend.close().catch(() => undefined);
+    }
+  });
 } finally {
   await mcp?.close().catch(() => undefined);
   await stopServer();

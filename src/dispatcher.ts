@@ -45,7 +45,7 @@ export function parseTarget(input: unknown, fallbackHandle = config.ownerHandle)
   const agentPart = rest.join("/").trim();
   if (head.startsWith("@")) return { handle: normaliseHandle(head), agent: agentPart || "*" };
   // Bare name: one of the owner's agents ("codex"), else treat as a handle ("bob").
-  const own = store.snapshot.owner.agents.find(a => a.name.toLowerCase() === head.toLowerCase());
+  const own = store.findPrincipal(fallbackHandle)?.agents.find(a => a.name.toLowerCase() === head.toLowerCase());
   if (own) return { handle: fallbackHandle, agent: own.name };
   return { handle: normaliseHandle(head), agent: agentPart || "*" };
 }

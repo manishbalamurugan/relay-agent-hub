@@ -1,11 +1,13 @@
 /**
- * Static bearer token check. One token (RELAY_TOKEN) guards /mcp and the REST tool surface.
- * Optional per-agent tokens (RELAY_AGENT_TOKENS="muse:abc,codex:def") also pass and tell the hub
- * which of the owner's agents is calling, so `from.agent` can default correctly.
+ * Bearer auth. Three kinds of token, all presented as `Authorization: Bearer <token>`:
+ *   - RELAY_TOKEN                      → the hub owner, admin (can mint invites, register endpoints)
+ *   - RELAY_AGENT_TOKENS=muse:tok,...  → the owner, bound to one named agent
+ *   - invite tokens (minted at runtime, stored hashed) → a peer principal (@friend), scoped to their own inbox
  */
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import { config } from "./config.js";
+import { store } from "./store.js";
 
 const agentTokens = new Map<string, string>(); // token -> agent name
 for (const pair of (process.env.RELAY_AGENT_TOKENS || "").split(",")) {
@@ -19,9 +21,17 @@ function safeEqual(a: string, b: string): boolean {
   return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
+export function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
 export interface Caller {
-  /** Owner's agent name this token is bound to, if any. */
+  /** Principal this token acts for. */
+  handle: string;
+  /** Agent name this token is bound to, if any. */
   agent?: string;
+  /** True for RELAY_TOKEN / RELAY_AGENT_TOKENS holders. */
+  admin: boolean;
 }
 
 export function extractToken(req: Request): string | undefined {
@@ -38,8 +48,11 @@ export function extractToken(req: Request): string | undefined {
 
 export function checkToken(token: string | undefined): Caller | null {
   if (!token) return null;
-  if (safeEqual(token, config.token)) return {};
-  for (const [tok, name] of agentTokens) if (safeEqual(token, tok)) return { agent: name };
+  const owner = store.snapshot.owner.handle;
+  if (safeEqual(token, config.token)) return { handle: owner, admin: true };
+  for (const [tok, name] of agentTokens) if (safeEqual(token, tok)) return { handle: owner, agent: name, admin: true };
+  const rec = store.snapshot.tokens[hashToken(token)];
+  if (rec && !rec.revoked_at) return { handle: rec.handle, agent: rec.agent, admin: false };
   return null;
 }
 
@@ -49,16 +62,29 @@ export function requireBearer(req: Request, res: Response, next: NextFunction): 
     res
       .status(401)
       .set("WWW-Authenticate", 'Bearer realm="relay"')
-      .json({ status: 401, error: "missing or invalid bearer token", hint: "Send: Authorization: Bearer <RELAY_TOKEN>" });
+      .json({ status: 401, error: "missing or invalid bearer token", hint: "Send: Authorization: Bearer <token>" });
     return;
   }
   (req as Request & { caller: Caller }).caller = caller;
   next();
 }
 
-/** The owner's agent a request is acting for: explicit header beats token binding. */
+export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  const caller = (req as Request & { caller?: Caller }).caller;
+  if (!caller?.admin) {
+    res.status(403).json({ status: 403, error: "admin token required (RELAY_TOKEN)" });
+    return;
+  }
+  next();
+}
+
+export function getCaller(req: Request): Caller {
+  return (req as Request & { caller: Caller }).caller;
+}
+
+/** The agent a request is acting for: explicit header beats token binding. */
 export function callerAgent(req: Request): string | undefined {
   const explicit = req.header("x-relay-agent")?.trim();
   if (explicit) return explicit;
-  return (req as Request & { caller?: Caller }).caller?.agent;
+  return getCaller(req).agent;
 }

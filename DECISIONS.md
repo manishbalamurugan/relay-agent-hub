@@ -105,6 +105,14 @@ in the loop; if any is wrong, it is a small, local change.
     domain exists, so the first deploy renders `/connect` correctly without the human copying the domain
     into a variable. An explicit `PUBLIC_URL` still wins (custom domains, other hosts).
 
+29. **Multi-tenant via invite tokens (added post-launch).** `POST /invites` mints `rly_…` tokens bound to a
+    handle, stored hashed. Every tool now scopes by the caller's handle: `inbox.list`/`inbox.reply` see only
+    envelopes to/from that principal, `from.handle` is forced to the caller (only the hub owner may set
+    `from_handle` for hub-to-hub forwarding), and admin routes (`/agents`, `/invites`) need `RELAY_TOKEN`.
+    The invite URL carries the token (`?t=`) so one link is enough to onboard a friend in the moment; the page
+    warns not to forward it and revocation is one DELETE. A claim-once code would be stricter and is the
+    obvious next hardening step.
+
 ## Not built (on purpose)
 
 - No UI beyond `/connect` and `/invite`, no database, no OAuth, no message signing (schema says

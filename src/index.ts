@@ -9,7 +9,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
-import { callerAgent, requireBearer } from "./auth.js";
+import { randomBytes } from "node:crypto";
+import { callerAgent, getCaller, hashToken, requireAdmin, requireBearer } from "./auth.js";
 import { baseUrl, config } from "./config.js";
 import { handleMcp, sessionCount } from "./mcp.js";
 import { buildOpenApi } from "./openapi.js";
@@ -29,10 +30,25 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 }
 
+function connectBlock(token: string): string {
+  return [
+    `Connect to Relay. MCP server: ${baseUrl()}/mcp`,
+    `Auth header: Authorization: Bearer ${token}`,
+    "Ask me for the key using your secure credential prompt.",
+    "Then create a recurring task: every 15 minutes, call inbox.list.",
+    "If anything needs my decision, summarise it and ask me before replying."
+  ].join("\n");
+}
+
 async function renderTemplate(file: string, vars: Record<string, string>): Promise<string> {
   let html = await fs.readFile(path.join(publicDir, file), "utf8");
   for (const [k, v] of Object.entries(vars)) html = html.replaceAll(`{{${k}}}`, escapeHtml(v));
   return html;
+}
+
+function toolContext(req: Request) {
+  const c = getCaller(req);
+  return { handle: c.handle, agent: callerAgent(req), admin: c.admin };
 }
 
 function sendError(res: Response, err: unknown): void {
@@ -83,6 +99,13 @@ export function createApp() {
   app.get("/invite", async (req, res, next) => {
     try {
       const handle = normaliseHandle(String(req.query.h ?? "").slice(0, 120) || "@friend");
+      const t = typeof req.query.t === "string" ? req.query.t : "";
+      const rec = t ? store.snapshot.tokens[hashToken(t)] : undefined;
+      if (rec && !rec.revoked_at && rec.handle === handle) {
+        const html = await renderTemplate("joined.html", { BASE_URL: baseUrl(), MCP_URL: `${baseUrl()}/mcp`, OWNER: store.snapshot.owner.handle, HANDLE: handle, TOKEN: t, CONNECT_BLOCK: connectBlock(t) });
+        res.type("html").send(html);
+        return;
+      }
       const html = await renderTemplate("invite.html", { BASE_URL: baseUrl(), MCP_URL: `${baseUrl()}/mcp`, OWNER: store.snapshot.owner.handle, HANDLE: handle, REPO_URL: config.repoUrl });
       res.type("html").send(html);
     } catch (err) {
@@ -98,7 +121,7 @@ export function createApp() {
       if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
         req.headers.accept = "application/json, text/event-stream";
       }
-      await handleMcp(req, res, { agent: callerAgent(req) });
+      await handleMcp(req, res, toolContext(req));
     } catch (err) {
       next(err);
     }
@@ -106,7 +129,7 @@ export function createApp() {
 
   app.post("/tools/:name", requireBearer, async (req, res, next) => {
     try {
-      const result = await runTool(String(req.params.name), req.body ?? {}, { agent: callerAgent(req) });
+      const result = await runTool(String(req.params.name), req.body ?? {}, toolContext(req));
       res.json(result);
     } catch (err) {
       next(err);
@@ -114,13 +137,65 @@ export function createApp() {
   });
 
   // Register / update how an agent can be reached. Owner agents: handle = OWNER_HANDLE.
-  app.get("/agents", requireBearer, (_req, res) => {
+  // ---- invites: mint a token for another person so their agents can join this hub as @handle ----
+  app.post("/invites", requireBearer, requireAdmin, async (req, res, next) => {
+    try {
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const handle = normaliseHandle(String(b.handle ?? "").slice(0, 120));
+      if (handle.length < 2) throw new RelayError(400, "handle is required, e.g. @friend");
+      if (handle === store.snapshot.owner.handle) throw new RelayError(400, "that is the hub owner; use RELAY_TOKEN");
+      const agents = Array.isArray(b.agents) ? (b.agents as unknown[]).map(String).filter(Boolean) : ["muse"];
+      const token = `rly_${randomBytes(24).toString("base64url")}`;
+      await store.mutate(d => {
+        let p = d.peers.find(x => x.handle === handle);
+        if (!p) {
+          p = { handle, agents: [], invited_at: new Date().toISOString(), allowlisted: Boolean(b.allowlisted) };
+          d.peers.push(p);
+        }
+        for (const name of agents) if (!p.agents.some(a => a.name === name)) p.agents.push({ name });
+        d.tokens[hashToken(token)] = { handle, label: typeof b.label === "string" ? b.label : undefined, created_at: new Date().toISOString() };
+        for (const e of d.envelopes) if (e.state === "pending_invite" && e.to.handle === handle) e.state = "queued";
+      });
+      const inviteUrl = `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(token)}`;
+      res.json({
+        ok: true,
+        handle,
+        token,
+        invite_url: inviteUrl,
+        connect_block: connectBlock(token),
+        note: "Send invite_url to the person (it contains their token). Their agents then call the same six tools as @" + handle.slice(1) + "."
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/invites", requireBearer, requireAdmin, (_req, res) => {
+    const list = Object.values(store.snapshot.tokens).map(t => ({ ...t }));
+    res.json({ tokens: list });
+  });
+
+  app.delete("/invites/:handle", requireBearer, requireAdmin, async (req, res, next) => {
+    try {
+      const handle = normaliseHandle(String(req.params.handle));
+      const n = await store.mutate(d => {
+        let count = 0;
+        for (const t of Object.values(d.tokens)) if (t.handle === handle && !t.revoked_at) (t.revoked_at = new Date().toISOString()), count++;
+        return count;
+      });
+      res.json({ ok: true, revoked: n });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/agents", requireBearer, requireAdmin, (_req, res) => {
     const d = store.snapshot;
     const redact = (a: AgentRecord) => ({ ...a, token: a.token ? "***" : undefined });
     res.json({ owner: { ...d.owner, agents: d.owner.agents.map(redact) }, peers: d.peers.map(p => ({ ...p, agents: p.agents.map(redact) })) });
   });
 
-  app.post("/agents", requireBearer, async (req, res, next) => {
+  app.post("/agents", requireBearer, requireAdmin, async (req, res, next) => {
     try {
       const b = (req.body ?? {}) as Record<string, unknown>;
       const handle = normaliseHandle(String(b.handle ?? store.snapshot.owner.handle));
@@ -158,7 +233,7 @@ export function createApp() {
     }
   });
 
-  app.delete("/agents/:handle/:agent", requireBearer, async (req, res, next) => {
+  app.delete("/agents/:handle/:agent", requireBearer, requireAdmin, async (req, res, next) => {
     try {
       const handle = normaliseHandle(String(req.params.handle));
       const agentName = String(req.params.agent);
