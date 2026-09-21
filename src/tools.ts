@@ -94,7 +94,8 @@ export function buildTools(): ToolDef[] {
           mutating: v.mutating,
           urgent: v.urgent,
           required_args: ((v.schema.required as string[] | undefined) ?? []).slice(),
-          args_schema: v.schema
+          args_schema: v.schema,
+          reply_schema: v.replySchema ?? null
         })),
         hub: { mcp_url: `${baseUrl()}/mcp`, openapi_url: `${baseUrl()}/openapi.json` }
       };
@@ -181,7 +182,14 @@ export function buildTools(): ToolDef[] {
         id: z.string().optional().describe("Fetch one message by id.")
       })
       .optional(),
-    limit: z.number().int().min(1).max(200).optional().describe("Max messages to return (default 50).")
+    limit: z.number().int().min(1).max(200).optional().describe("Max messages to return (default 50)."),
+    wait_s: z
+      .number()
+      .int()
+      .min(0)
+      .max(config.longPollMaxS)
+      .optional()
+      .describe(`Long-poll: if nothing is waiting, hold the request open up to this many seconds and return as soon as a message arrives (max ${config.longPollMaxS}). Use it in a loop for real-time delivery.`)
   };
 
   const inboxList: ToolDef<typeof listShape> = {
@@ -196,19 +204,25 @@ export function buildTools(): ToolDef[] {
       const direction = f.direction ?? "inbound";
       const since = a.since ? Date.parse(a.since) : NaN;
       const me = ctx.handle;
-      let list = store.snapshot.envelopes.filter(e => {
+      const forAgent = f.for_agent ?? ctx.agent;
+      const matches = (e: StoredEnvelope) => {
         // A principal only ever sees envelopes it sent or received.
         if (e.to.handle !== me && e.from.handle !== me) return false;
         if (f.id) return e.id === f.id;
         if (state !== "all" && e.state !== state) return false;
-        if (direction === "inbound" && !inboundFor(e, me, f.for_agent ?? ctx.agent)) return false;
+        if (direction === "inbound" && !inboundFor(e, me, forAgent)) return false;
         if (direction === "outbound" && e.from.handle !== me) return false;
         if (f.verb && e.verb !== f.verb) return false;
         if (f.from_handle && e.from.handle !== dispatcher.normaliseHandle(f.from_handle)) return false;
         if (f.needs_decision !== undefined && e.needs_decision !== f.needs_decision) return false;
         if (!Number.isNaN(since) && Date.parse(e.received_at) <= since) return false;
         return true;
-      });
+      };
+      let list = store.snapshot.envelopes.filter(matches);
+      if (list.length === 0 && (a.wait_s ?? 0) > 0) {
+        const hit = await dispatcher.waitForEnvelope(e => matches(e), Math.min(a.wait_s!, config.longPollMaxS) * 1000);
+        if (hit) list = store.snapshot.envelopes.filter(matches);
+      }
       list = list.sort((x, y) => Date.parse(x.received_at) - Date.parse(y.received_at));
       const limit = a.limit ?? 50;
       const total = list.length;

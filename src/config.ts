@@ -31,6 +31,7 @@ export const config = {
   /** Shown on /invite so a peer can self-host their own hub. */
   repoUrl: process.env.REPO_URL || "https://github.com/manishbalamurugan/relay-agent-hub",
   askDefaultTimeoutS: 30,
+  longPollMaxS: 55,
   askMaxTimeoutS: 60,
   noteMaxChars: 280,
   defaultTtlMs: 24 * 60 * 60 * 1000,

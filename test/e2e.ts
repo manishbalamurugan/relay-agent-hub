@@ -600,6 +600,56 @@ try {
     const rt = await fetch(asm.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tj.refresh_token }) });
     expect(rt.status === 200, "refresh failed");
   });
+  await step(22, "Extra: real-time — inbox.list long-poll wakes on arrival, agent.ask returns the reply inline, MCP push fires", async () => {
+    // Mint a key for the owner's "claude" agent; it long-polls its own inbox like the worker does.
+    const mint = await fetch(`${base}/agents/tokens`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ agent: "claude" }) });
+    const minted = (await mint.json()) as any;
+    expect(mint.status === 200 && minted.token, `mint ${JSON.stringify(minted)}`);
+    const agentKey: string = minted.token;
+    const agentRest = (tool: string, body: unknown) =>
+      fetch(`${base}/tools/${tool}`, { method: "POST", headers: { Authorization: `Bearer ${agentKey}`, "content-type": "application/json" }, body: JSON.stringify(body) }).then(async r => ({ status: r.status, json: (await r.json()) as any }));
+
+    // Session for the agent so we can catch the push notification.
+    const agentMcp = new Client({ name: "claude-agent", version: "0" });
+    const pushed: any[] = [];
+    agentMcp.setNotificationHandler(
+      (await import("@modelcontextprotocol/sdk/types.js")).LoggingMessageNotificationSchema,
+      n => {
+        pushed.push(n.params);
+      }
+    );
+    await agentMcp.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${agentKey}` } } }));
+
+    // 1) Long-poll with an empty inbox: must hold, then return within ~1s of arrival.
+    const t0 = Date.now();
+    const poll = agentRest("inbox.list", { wait_s: 20 });
+    await new Promise(r => setTimeout(r, 700));
+    // 2) Owner asks its claude agent; this should NOT return "queued" — it should wait for the reply.
+    const ask = call("agent.ask", { to: `${OWNER}/claude`, verb: "question.freeform", args: { question: "best food near LAX Renaissance?" }, timeout_s: 20 });
+    const polled = await poll;
+    const elapsed = Date.now() - t0;
+    expect(polled.status === 200 && polled.json.messages?.length === 1, `long-poll returned ${JSON.stringify(polled.json).slice(0, 200)}`);
+    expect(elapsed >= 650 && elapsed < 5000, `long-poll timing off: ${elapsed}ms`);
+    const msg = polled.json.messages[0];
+    expect(msg.verb === "question.freeform" && msg.to.agent === "claude", "wrong message delivered to long-poller");
+    // 3) Agent replies; the pending ask must resolve with the answer inline.
+    const rep = await agentRest("inbox.reply", { id: msg.id, args: { answer: "Try the ramen place in the terminal food court." } });
+    expect(rep.status === 200, `reply ${JSON.stringify(rep.json)}`);
+    const answered = await ask;
+    expect(!answered.isError && answered.data.status === "answered", `ask should be answered inline, got ${JSON.stringify(answered.data).slice(0, 200)}`);
+    expect(answered.data.reply?.args?.answer?.includes("ramen"), "inline reply missing answer");
+    // 4) The inline-returned reply should not linger as a queued item in the owner's inbox.
+    const ownerInbox = await call("inbox.list", {});
+    expect(!ownerInbox.data.messages.some((m: any) => m.id === answered.data.reply.id), "inline reply still queued in inbox");
+    // 5) MCP push: the agent session should have received a relay/inbox notification.
+    await new Promise(r => setTimeout(r, 300));
+    expect(pushed.some(p => p.logger === "relay/inbox" && (p.data as any)?.id === msg.id), `no push notification received (${pushed.length} notifications)`);
+    // 6) Long-poll with nothing arriving returns empty after wait_s (bounded).
+    const t1 = Date.now();
+    const empty = await agentRest("inbox.list", { wait_s: 1 });
+    expect(empty.json.messages.length === 0 && Date.now() - t1 >= 900, "bounded long-poll did not wait");
+    await agentMcp.close();
+  });
 } finally {
   await mcp?.close().catch(() => undefined);
   await stopServer();

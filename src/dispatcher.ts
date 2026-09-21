@@ -6,6 +6,7 @@
  *     known principal, nothing reachable                    → ASYNC  (queue, eta ~15m)
  *     unknown                                               → not_connected + invite_url
  */
+import { EventEmitter } from "node:events";
 import { baseUrl, config } from "./config.js";
 import { draft, present, validate } from "./envelope.js";
 import { getVerb, replyKindFor } from "./registry.js";
@@ -18,6 +19,32 @@ export type Resolution =
   | { mode: "sync"; principal: Principal; agent: AgentRecord; transport: Transport }
   | { mode: "async"; principal: Principal; agent?: AgentRecord }
   | { mode: "unknown"; invite_url: string };
+
+/** Fires "envelope" with the StoredEnvelope every time one is persisted. Long-pollers and MCP push subscribe here. */
+export const inboxEvents = new EventEmitter();
+inboxEvents.setMaxListeners(1000);
+
+export const ASYNC_ETA = "when the recipient next checks its inbox (instant if it is long-polling)";
+
+/** Resolve with the first persisted envelope matching `pred`, or undefined after `ms`. */
+export function waitForEnvelope(pred: (e: StoredEnvelope) => boolean, ms: number): Promise<StoredEnvelope | undefined> {
+  return new Promise(resolve => {
+    const onEnv = (e: StoredEnvelope) => {
+      if (!pred(e)) return;
+      cleanup();
+      resolve(e);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(undefined);
+    }, ms);
+    const cleanup = () => {
+      clearTimeout(timer);
+      inboxEvents.off("envelope", onEnv);
+    };
+    inboxEvents.on("envelope", onEnv);
+  });
+}
 
 export function inviteUrl(handle: string): string {
   return `${baseUrl()}/invite?h=${encodeURIComponent(handle)}`;
@@ -78,6 +105,7 @@ async function persist(env: Envelope, state: StoredEnvelope["state"]): Promise<S
     }
   });
   void notifyIfUrgent(stored);
+  inboxEvents.emit("envelope", stored);
   return stored;
 }
 
@@ -134,7 +162,16 @@ export async function ask(env: Envelope, timeoutMs: number): Promise<AskResult> 
   }
   if (res.mode === "async") {
     await persist(env, "queued");
-    return { status: "queued", id: env.id, eta: "~15m" };
+    // Hold the caller open: if the recipient is long-polling, its reply arrives within seconds.
+    const reply = await waitForEnvelope(e => e.corr === env.id && e.from.handle === env.to.handle, timeoutMs);
+    if (reply) {
+      await store.mutate(d => {
+        const r = d.envelopes.find(x => x.id === reply.id);
+        if (r && r.state === "queued") r.state = "delivered"; // returned inline; don't leave it pending in the inbox
+      });
+      return { status: "answered", id: env.id, reply: present({ ...reply, state: "delivered" }) };
+    }
+    return { status: "queued", id: env.id, eta: ASYNC_ETA, reason: "recipient has not answered yet; the reply will appear in your inbox" };
   }
   const target: Party = { handle: res.principal.handle, agent: res.agent.name };
   try {
@@ -154,7 +191,7 @@ export async function ask(env: Envelope, timeoutMs: number): Promise<AskResult> 
     const reason = err instanceof RelayError ? `${err.message} ${JSON.stringify(err.details)}` : (err as Error).message;
     console.warn(`[dispatch] sync ask to ${target.handle}/${target.agent} failed, queueing: ${reason}`);
     await persist(env, "queued");
-    return { status: "queued", id: env.id, eta: "~15m", reason: `peer did not answer in time (${reason.slice(0, 200)})` };
+    return { status: "queued", id: env.id, eta: ASYNC_ETA, reason: `peer did not answer in time (${reason.slice(0, 200)})` };
   }
 }
 
@@ -178,7 +215,7 @@ export async function send(env: Envelope): Promise<SendResult> {
     void deliverInBackground(env, res);
     return { status: "queued", id: env.id, eta: "now", delivering: true };
   }
-  return { status: "queued", id: env.id, eta: "~15m" };
+  return { status: "queued", id: env.id, eta: ASYNC_ETA };
 }
 
 async function deliverInBackground(env: Envelope, res: Extract<Resolution, { mode: "sync" }>): Promise<void> {
