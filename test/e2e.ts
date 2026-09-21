@@ -479,6 +479,19 @@ try {
       expect(who.data.owner === "@friend" && who.data.peers.some((p: any) => p.handle === OWNER), `friend whoami ${JSON.stringify(who.data).slice(0, 200)}`);
       const fin = await fcall("inbox.list", { filter: { state: "all", direction: "all" } });
       expect(fin.data.total === 0, `friend can see ${fin.data.total} of the owner's envelopes`);
+      // Regression (Saurav): a key with no bound agent must speak as the principal's only agent, never "unknown",
+      // and the owner's reply must be visible when the friend polls with for_agent set.
+      expect(who.data.acting_as === "muse", `unbound guest key should act as its only agent, got ${who.data.acting_as}`);
+      const q = await fcall("agent.send", { to: OWNER, verb: "question.freeform", args: { question: "what time is the gym?" } });
+      expect(!q.isError && q.data.status === "queued", `friend send ${JSON.stringify(q.data)}`);
+      const landed = (await call("inbox.list", { filter: { id: q.data.id } })).data.messages[0];
+      expect(landed?.from?.agent === "muse", `friend message went out as ${JSON.stringify(landed?.from)}`);
+      const ans = await call("inbox.reply", { id: q.data.id, args: { answer: "6 to 8" } });
+      expect(!ans.isError && ans.data.reply.to.agent === "muse", `reply addressed to ${JSON.stringify(ans.data.reply.to)}`);
+      const seen = await fcall("inbox.list", { filter: { for_agent: "muse" } });
+      expect(seen.data.messages.some((m: any) => m.id === ans.data.reply.id), "friend polling with for_agent=muse did not see the owner's reply");
+      const peerView = (await call("identity.whoami")).data.peers.find((p: any) => p.handle === "@friend");
+      expect(peerView?.agents?.[0]?.last_seen, "polling should stamp last_seen so the owner can tell the friend's Muse is listening");
       const noAdmin = await fetch(`${base}/agents`, { headers: { Authorization: `Bearer ${j.token}` } });
       expect(noAdmin.status === 403, `guest reached admin route: ${noAdmin.status}`);
       // Owner proposes a deal to the friend.

@@ -48,6 +48,12 @@ export class Store {
   private seedOwner(): void {
     this.data.owner.handle = config.ownerHandle;
     if (this.data.owner.agents.length === 0) this.data.owner.agents = config.ownerAgents.map(name => ({ name }));
+    // Peers who joined before default_agent existed: give them one so their messages stop going out as "unknown".
+    for (const p of this.data.peers) p.default_agent ||= p.agents[0]?.name;
+    // Messages already parked for "@x/unknown" become deliverable to any of @x's agents.
+    for (const e of this.data.envelopes) {
+      if (e.to.agent === "unknown") e.to.agent = "*";
+    }
   }
 
   get snapshot(): Readonly<StoreData> {
@@ -81,10 +87,16 @@ export class Store {
     return this.data.peers.find(p => p.handle === handle);
   }
 
+  /** Which agent a principal speaks as when its key is not bound to one: the explicit default, else its only agent. */
+  impliedAgent(p: Principal | undefined): string | undefined {
+    if (!p) return undefined;
+    return p.default_agent || (p.agents.length === 1 ? p.agents[0].name : undefined);
+  }
+
   findAgent(handle: string, agent: string): AgentRecord | undefined {
     const p = this.findPrincipal(handle);
     if (!p) return undefined;
-    if (agent === "*" || !agent) {
+    if (agent === "*" || !agent || agent === "unknown") {
       // Prefer a reachable agent when the sender does not care which one answers.
       return p.agents.find(a => a.endpoint_url) ?? p.agents[0];
     }

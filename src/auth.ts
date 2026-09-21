@@ -60,12 +60,12 @@ export function describeCredential(req: Request): string {
 export function checkToken(token: string | undefined): Caller | null {
   if (!token) return null;
   const owner = store.snapshot.owner.handle;
-  if (safeEqual(token, config.token)) return { handle: owner, agent: store.snapshot.owner.default_agent || config.ownerTokenAgent || undefined, admin: true };
+  if (safeEqual(token, config.token)) return { handle: owner, agent: store.snapshot.owner.default_agent || config.ownerTokenAgent || store.impliedAgent(store.snapshot.owner), admin: true };
   const rec = store.snapshot.tokens[hashToken(token)];
   if (rec && !rec.revoked_at && rec.handle) {
     rec.last_used_at = new Date().toISOString(); // in-memory only; flushed with the next mutation
     const principal = store.findPrincipal(rec.handle);
-    return { handle: rec.handle, agent: rec.agent ?? principal?.default_agent, admin: false };
+    return { handle: rec.handle, agent: rec.agent ?? store.impliedAgent(principal), admin: false };
   }
   return null;
 }

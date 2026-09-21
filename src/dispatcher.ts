@@ -134,7 +134,7 @@ function buildReply(original: Envelope, target: Party, reply: { verb?: string; a
   if (!verb) throw new RelayError(502, `peer replied with unknown verb '${verbName}'`);
   const raw = draft({
     from: target,
-    to: original.from,
+    to: original.from.agent && original.from.agent !== "unknown" ? original.from : { handle: original.from.handle, agent: "*" },
     verb: verbName,
     args: reply?.args ?? {},
     note: reply?.note ?? null,

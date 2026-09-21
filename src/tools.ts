@@ -55,7 +55,18 @@ export function buildTools(): ToolDef[] {
   const fromAgentField = z.string().min(1).optional().describe("Which of the user's agents you are (muse, claude-code, codex, cursor). Defaults to the agent bound to your token.");
 
   function actingAgent(explicit: string | undefined, ctx: ToolContext): string {
-    return explicit?.trim() || ctx.agent || "unknown";
+    return explicit?.trim() || ctx.agent || store.impliedAgent(store.findPrincipal(ctx.handle)) || "unknown";
+  }
+
+  /** A reply goes back to whoever asked; if they never said which agent, address it to any of theirs. */
+  function replyTarget(from: Party): Party {
+    return from.agent && from.agent !== "unknown" ? from : { handle: from.handle, agent: "*" };
+  }
+
+  /** Polling is the heartbeat: remember when each agent last looked at its inbox (flushed with the next mutation). */
+  function touchAgent(ctx: ToolContext): void {
+    const rec = ctx.agent ? store.findAgent(ctx.handle, ctx.agent) : undefined;
+    if (rec && rec.name === ctx.agent) rec.last_seen = new Date().toISOString();
   }
 
   function agentView(handle: string, a: { name: string; endpoint_url?: string; last_seen?: string }, kind: "own" | "peer") {
@@ -67,7 +78,8 @@ export function buildTools(): ToolDef[] {
   function inboundFor(e: StoredEnvelope, handle: string, forAgent?: string): boolean {
     if (e.to.handle !== handle) return false;
     if (!forAgent) return true;
-    return e.to.agent === "*" || e.to.agent === forAgent;
+    // "unknown" is what older hubs stamped on senders with an unbound key; treat it like "any agent".
+    return e.to.agent === "*" || e.to.agent === "unknown" || e.to.agent === forAgent;
   }
 
   // ------------------------------------------------------------------------------------------------
@@ -83,7 +95,7 @@ export function buildTools(): ToolDef[] {
       const others = [d.owner, ...d.peers].filter(p => p.handle !== ctx.handle);
       return {
         owner: ctx.handle,
-        acting_as: ctx.agent ?? "unknown",
+        acting_as: actingAgent(undefined, ctx),
         role: ctx.admin ? "hub owner" : "guest on " + d.owner.handle + "'s hub",
         agents: (me?.agents ?? []).map(a => agentView(ctx.handle, a, "own")),
         display_name: me?.display_name ?? null,
@@ -199,6 +211,7 @@ export function buildTools(): ToolDef[] {
     readOnly: true,
     async handler(a, ctx) {
       if (store.sweepExpired()) await store.mutate(() => undefined);
+      touchAgent(ctx);
       const f = a.filter ?? {};
       const state = f.state ?? "queued";
       const direction = f.direction ?? "inbound";
@@ -256,10 +269,10 @@ export function buildTools(): ToolDef[] {
       const verbName = a.verb ?? original.verb;
       const verb = getVerb(verbName);
       if (!verb) throw new RelayError(400, `unknown verb '${verbName}'`, { known_verbs: verbNames() });
-      const fromAgent = a.from_agent?.trim() || (original.to.agent !== "*" ? original.to.agent : undefined) || ctx.agent || "unknown";
+      const fromAgent = a.from_agent?.trim() || (original.to.agent !== "*" ? original.to.agent : undefined) || actingAgent(undefined, ctx);
       const from: Party = { handle: ctx.handle, agent: fromAgent };
       const reply = validate(
-        draft({ from, to: original.from, verb: verbName, args: a.args ?? {}, note: a.note ?? null, corr: original.id, kind: replyKindFor(verb, original.kind) })
+        draft({ from, to: replyTarget(original.from), verb: verbName, args: a.args ?? {}, note: a.note ?? null, corr: original.id, kind: replyKindFor(verb, original.kind) })
       );
       const result = await dispatcher.send(reply);
       await store.mutate(d => {

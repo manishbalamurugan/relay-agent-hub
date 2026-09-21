@@ -51,6 +51,7 @@ export function bindToken(d: StoreData, token: string, handle: string, agents: s
   if (displayName) p.display_name = displayName;
   p.connected_at ??= now();
   for (const name of agents) if (!p.agents.some(a => a.name === name)) p.agents.push({ name });
+  p.default_agent ||= agents[0] ?? p.agents[0]?.name; // so their messages never go out as "unknown"
   d.tokens[hashToken(token)] = { ...(d.tokens[hashToken(token)] ?? { created_at: now() }), handle, label };
   releaseParked(d, handle);
 }
