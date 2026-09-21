@@ -24,7 +24,7 @@ export const config = {
   /** Optional webhook that receives a JSON summary whenever an urgent envelope is queued. */
   notifyWebhookUrl: process.env.NOTIFY_WEBHOOK_URL || "",
   /** Shown on /invite so a peer can self-host their own hub. */
-  repoUrl: process.env.REPO_URL || "https://github.com/manish/relay-agent-hub",
+  repoUrl: process.env.REPO_URL || "https://github.com/manishbalamurugan/relay-agent-hub",
   askDefaultTimeoutS: 30,
   askMaxTimeoutS: 60,
   noteMaxChars: 280,
