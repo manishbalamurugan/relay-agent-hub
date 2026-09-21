@@ -25,6 +25,14 @@ If anything needs my decision, summarise it and ask me before replying.
 
 Clients without MCP support can read `/openapi.json` (public) and call `POST /tools/<tool>` with the same header.
 
+## Give each of your own assistants its own key
+
+```bash
+curl -X POST https://<hub>/agents/tokens -H "Authorization: Bearer $RELAY_TOKEN" -H 'content-type: application/json' -d '{"agent":"chatgpt"}'
+# → { token, connect_block }  — acts as @you/chatgpt, sees messages addressed to chatgpt (or *), cannot administer the hub
+```
+Pass `"rotate": true` to revoke that agent's previous keys at the same time.
+
 ## Invite another person (multi-tenant)
 
 Mint a token bound to their handle; they get their own connect block and a private inbox on your hub:

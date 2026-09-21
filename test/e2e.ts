@@ -534,6 +534,20 @@ try {
       expect(ownerRot.status === 200, `owner rotate ${ownerRot.status}`);
       const newDead = await fetch(`${base}/tools/inbox.list`, { method: "POST", headers: { Authorization: `Bearer ${rj.token}`, "content-type": "application/json" }, body: "{}" });
       expect(newDead.status === 401, "owner rotation did not revoke guest key");
+      // Owner-agent key: acts as @owner/chatgpt, non-admin, inbox defaults to that agent's messages.
+      const ak = (await (await fetch(`${base}/agents/tokens`, { method: "POST", headers: authHeaders, body: JSON.stringify({ agent: "ChatGPT" }) })).json()) as any;
+      expect(ak.token?.startsWith("rly_") && ak.agent === "chatgpt", `agent token ${JSON.stringify(ak)}`);
+      const gptHeaders = { Authorization: `Bearer ${ak.token}`, "content-type": "application/json" };
+      const gptWho = (await (await fetch(`${base}/tools/identity.whoami`, { method: "POST", headers: gptHeaders, body: "{}" })).json()) as any;
+      expect(gptWho.owner === OWNER && gptWho.acting_as === "chatgpt" && gptWho.agents.some((a: any) => a.agent === "chatgpt"), `gpt whoami ${JSON.stringify(gptWho).slice(0, 200)}`);
+      expect((await fetch(`${base}/invites`, { headers: gptHeaders })).status === 403, "agent key reached admin route");
+      await call("agent.send", { to: "chatgpt", verb: "question.freeform", args: { question: "for gpt only" }, from_agent: "muse" });
+      await call("agent.send", { to: "cursor", verb: "question.freeform", args: { question: "for cursor only" }, from_agent: "muse" });
+      const gptInbox = (await (await fetch(`${base}/tools/inbox.list`, { method: "POST", headers: gptHeaders, body: "{}" })).json()) as any;
+      expect(gptInbox.messages.some((m: any) => m.args.question === "for gpt only") && !gptInbox.messages.some((m: any) => m.args.question === "for cursor only"), "agent-bound inbox not scoped");
+      const gptSend = (await (await fetch(`${base}/tools/agent.send`, { method: "POST", headers: gptHeaders, body: JSON.stringify({ to: "muse", verb: "presence.ping", args: {} }) })).json()) as any;
+      const sent = await call("inbox.list", { filter: { id: gptSend.id } });
+      expect(sent.data.messages[0]?.from.agent === "chatgpt" && sent.data.messages[0]?.from.handle === OWNER, "from.agent not taken from agent key");
       // Revoke → 401.
       const rev = await fetch(`${base}/invites/${encodeURIComponent("@friend")}`, { method: "DELETE", headers: authHeaders });
       expect(rev.status === 200, `revoke ${rev.status}`);

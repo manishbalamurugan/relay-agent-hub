@@ -279,6 +279,25 @@ export function createApp() {
     }
   });
 
+  // Owner: mint a key for one of *your own* agents (chatgpt, claude, grok…). It acts as @owner/<agent>,
+  // sees the owner inbox (defaulting to messages for that agent), and cannot administer the hub.
+  app.post("/agents/tokens", requireBearer, requireAdmin, async (req, res, next) => {
+    try {
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const agent = String(b.agent ?? "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 40);
+      if (agent.length < 2) throw new RelayError(400, "agent name is required, e.g. chatgpt");
+      const token = `rly_${randomBytes(24).toString("base64url")}`;
+      await store.mutate(d => {
+        if (!d.owner.agents.some(a => a.name === agent)) d.owner.agents.push({ name: agent });
+        if (b.rotate === true) for (const t of Object.values(d.tokens)) if (t.handle === d.owner.handle && t.agent === agent && !t.revoked_at) t.revoked_at = new Date().toISOString();
+        d.tokens[hashToken(token)] = { handle: d.owner.handle, agent, label: typeof b.label === "string" ? b.label : `owner agent ${agent}`, created_at: new Date().toISOString() };
+      });
+      res.json({ ok: true, handle: store.snapshot.owner.handle, agent, token, connect_block: connectBlock(token) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.get("/invites", requireBearer, requireAdmin, (_req, res) => {
     const list = Object.values(store.snapshot.tokens).map(t => ({ ...t }));
     res.json({ tokens: list });

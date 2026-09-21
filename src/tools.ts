@@ -201,7 +201,7 @@ export function buildTools(): ToolDef[] {
         if (e.to.handle !== me && e.from.handle !== me) return false;
         if (f.id) return e.id === f.id;
         if (state !== "all" && e.state !== state) return false;
-        if (direction === "inbound" && !inboundFor(e, me, f.for_agent)) return false;
+        if (direction === "inbound" && !inboundFor(e, me, f.for_agent ?? ctx.agent)) return false;
         if (direction === "outbound" && e.from.handle !== me) return false;
         if (f.verb && e.verb !== f.verb) return false;
         if (f.from_handle && e.from.handle !== dispatcher.normaliseHandle(f.from_handle)) return false;

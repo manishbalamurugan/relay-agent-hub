@@ -123,6 +123,11 @@ in the loop; if any is wrong, it is a small, local change.
     prefix — never the key — so "wrong key" vs "no header" is obvious. Rotation: `POST /me/rotate` (self) and
     `POST /invites/:handle/rotate` (owner); the presented/previous key is revoked atomically.
 
+32. **Owner-agent keys.** `POST /agents/tokens {agent}` mints a non-admin key bound to `@owner/<agent>`. Its
+    inbox defaults to messages addressed to that agent or `*`, and `from.agent` is taken from the key, so four
+    consumer assistants on one hub are distinguishable without trusting each to name itself. RELAY_TOKEN
+    remains the only admin credential.
+
 ## Not built (on purpose)
 
 - No UI beyond `/connect` and `/invite`, no database, no OAuth, no message signing (schema says
