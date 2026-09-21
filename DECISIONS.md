@@ -101,6 +101,10 @@ in the loop; if any is wrong, it is a small, local change.
     and plugin-drop steps exercise the actual boot path. Three extra steps (17–19) cover the sync transport
     with a mock MCP peer, stateless MCP + REST auth, and conditional/reply-schema validation.
 
+28. **`PUBLIC_URL` falls back to `https://$RAILWAY_PUBLIC_DOMAIN`.** Railway injects that variable once a
+    domain exists, so the first deploy renders `/connect` correctly without the human copying the domain
+    into a variable. An explicit `PUBLIC_URL` still wins (custom domains, other hosts).
+
 ## Not built (on purpose)
 
 - No UI beyond `/connect` and `/invite`, no database, no OAuth, no message signing (schema says

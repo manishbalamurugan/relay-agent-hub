@@ -13,8 +13,11 @@ export const config = {
   host: "0.0.0.0",
   token: process.env.RELAY_TOKEN || (generatedToken as string),
   tokenWasGenerated: generatedToken !== null,
-  /** Public base URL, e.g. https://relay.up.railway.app — no trailing slash. */
-  publicUrl: (process.env.PUBLIC_URL || "").replace(/\/+$/, ""),
+  /**
+   * Public base URL, e.g. https://relay.up.railway.app — no trailing slash.
+   * Falls back to Railway's injected RAILWAY_PUBLIC_DOMAIN so /connect is right on the first deploy.
+   */
+  publicUrl: (process.env.PUBLIC_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "")).replace(/\/+$/, ""),
   ownerHandle: normaliseHandle(process.env.OWNER_HANDLE || "@owner"),
   ownerAgents: (process.env.OWNER_AGENTS || "muse,claude-code,codex,cursor")
     .split(",")
