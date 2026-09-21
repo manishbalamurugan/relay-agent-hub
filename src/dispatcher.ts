@@ -201,7 +201,10 @@ export interface SendResult {
   eta?: string;
   invite_url?: string;
   delivering?: boolean;
+  track?: string;
 }
+
+const TRACK = "inbox.list {filter:{id}} shows seen_at once the recipient has read it and state 'answered' once they reply.";
 
 /** Fire-and-forget send: always queued; pushed in the background when a transport can reach the target. */
 export async function send(env: Envelope): Promise<SendResult> {
@@ -213,9 +216,9 @@ export async function send(env: Envelope): Promise<SendResult> {
   await persist(env, "queued");
   if (res.mode === "sync") {
     void deliverInBackground(env, res);
-    return { status: "queued", id: env.id, eta: "now", delivering: true };
+    return { status: "queued", id: env.id, eta: "now", delivering: true, track: TRACK };
   }
-  return { status: "queued", id: env.id, eta: ASYNC_ETA };
+  return { status: "queued", id: env.id, eta: ASYNC_ETA, track: TRACK };
 }
 
 async function deliverInBackground(env: Envelope, res: Extract<Resolution, { mode: "sync" }>): Promise<void> {

@@ -40,6 +40,8 @@ export interface StoredEnvelope extends Envelope {
   /** True when the owner should be consulted before anyone acts on it. */
   needs_decision: boolean;
   answered_by?: string;
+  /** First time the recipient listed this message; lets the sender tell "unread" from "read, not yet answered". */
+  seen_at?: string;
 }
 
 /** A verb plugin. One file per verb in src/verbs/. */

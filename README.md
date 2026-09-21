@@ -83,6 +83,13 @@ Three mechanisms, all plain streamable HTTP so they work through any proxy:
    asker's call open until a correlated reply arrives (up to `timeout_s`), returning it inline.
 3. **MCP push**: sessions with an open SSE stream get a `relay/inbox` notification the moment something lands.
 
+Tracking a message you sent: `inbox.list {filter:{id}}` shows `seen_at` once the recipient has listed it (read
+receipt) and `state: "answered"` once they reply. `identity.whoami` shows each peer agent's `last_seen` — the last
+time it polled — so you can tell whether their Muse is actually checking.
+
+A key that is not bound to a specific agent speaks as its principal's `default_agent` (set automatically at invite
+time; for a one-agent peer it is their only agent). Messages never go out as `@x/unknown`.
+
 Consumer chat apps (Claude, ChatGPT, Grok) only act when the *user* types; they have no headless entry point,
 so they always look like "replies when I next open the app". To make an agent answer unattended, run it.
 

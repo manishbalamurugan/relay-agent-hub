@@ -240,6 +240,14 @@ export function buildTools(): ToolDef[] {
       const limit = a.limit ?? 50;
       const total = list.length;
       list = list.slice(-limit);
+      // Read receipt: the recipient has now seen these. Persisted so the sender's next inbox.list shows seen_at.
+      const unseen = list.filter(e => e.to.handle === me && !e.seen_at);
+      if (unseen.length) {
+        const ts = new Date().toISOString();
+        await store.mutate(d => {
+          for (const e of d.envelopes) if (unseen.some(u => u.id === e.id)) e.seen_at ??= ts;
+        });
+      }
       return {
         count: list.length,
         total,

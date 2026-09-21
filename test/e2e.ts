@@ -492,6 +492,8 @@ try {
       expect(seen.data.messages.some((m: any) => m.id === ans.data.reply.id), "friend polling with for_agent=muse did not see the owner's reply");
       const peerView = (await call("identity.whoami")).data.peers.find((p: any) => p.handle === "@friend");
       expect(peerView?.agents?.[0]?.last_seen, "polling should stamp last_seen so the owner can tell the friend's Muse is listening");
+      const tracked = (await call("inbox.list", { filter: { id: ans.data.reply.id, state: "all", direction: "all" } })).data.messages[0];
+      expect(tracked?.seen_at && tracked.state === "queued", `sender should see seen_at (read, not yet answered): ${JSON.stringify(tracked).slice(0, 200)}`);
       const noAdmin = await fetch(`${base}/agents`, { headers: { Authorization: `Bearer ${j.token}` } });
       expect(noAdmin.status === 403, `guest reached admin route: ${noAdmin.status}`);
       // Owner proposes a deal to the friend.
