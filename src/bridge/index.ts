@@ -106,7 +106,7 @@ interface Identity {
 }
 
 async function whoami(hub: string, a: AgentConfig): Promise<Identity> {
-  const { status, json } = await tool(hub, a.key, "identity.whoami", {});
+  const { status, json } = await tool(hub, a.key, "identity.whoami", {}).catch(err => fail(`${a.name}: cannot reach hub ${hub}: ${(err as Error).cause ?? (err as Error).message}`));
   if (status !== 200) fail(`${a.name}: identity.whoami → ${status} ${JSON.stringify(json).slice(0, 300)}`);
   const verbs: Identity["verbs"] = {};
   for (const v of json.verbs ?? []) verbs[v.verb] = { mutating: !!v.mutating, describe: v.describe ?? "", reply_schema: v.reply_schema ?? null };
