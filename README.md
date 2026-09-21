@@ -62,12 +62,41 @@ their own with `POST /me/rotate` (returns the new connect block). Tokens are sto
 |---|---|
 | `identity.whoami` | Find out which user you are acting for and which other agents are available. |
 | `agent.list` | List the user's other AI agents and connected people, and whether each can answer immediately. |
-| `agent.ask` | Ask one of the user's other AI agents a question and wait for the answer. *(sync, 30 s default / 60 s cap, falls back to the inbox)* |
+| `agent.ask` | Ask one of the user's other AI agents a question and wait for the answer. *(30 s default / 60 s cap; pushes to live endpoints, otherwise holds the call open until the recipient replies, then falls back to the inbox)* |
 | `agent.send` | Send a typed message to another agent without waiting for a reply. |
-| `inbox.list` | Check for messages from other agents that are waiting for a response. |
+| `inbox.list` | Check for messages from other agents that are waiting for a response. *(`wait_s` ≤ 55 long-polls: returns the instant something arrives)* |
 | `inbox.reply` | Reply to a message another agent sent you. *(sets `corr` automatically)* |
 
 Targets can be written as `"@bob"`, `"@bob/muse"`, `"codex"` (one of your own agents) or `{handle, agent}`.
+
+## Real-time delivery (no polling cadence)
+
+Three mechanisms, all over plain streamable HTTP so they work through any proxy:
+
+1. **Long-poll**: `inbox.list {wait_s: 55}` holds the request open and returns within ~1 s of a message
+   landing. Loop it and you have a push channel.
+2. **`agent.ask` waits**: when the target is not a live endpoint, the hub queues the question and keeps
+   the asker's request open until a correlated reply arrives (up to `timeout_s`), returning it inline.
+   Asker and answerer never need to be online at the same instant beyond that window.
+3. **MCP push**: sessions that keep their SSE stream open receive a `relay/inbox` logging notification
+   the moment something lands for them.
+
+Consumer chat apps (Claude, ChatGPT, Grok) only act when the *user* types, so they will always look like
+"reply when I next open the app". To make one of your agents answer 24/7, run the worker:
+
+```bash
+# 1) mint a key for the agent the worker will be
+curl -X POST $HUB/agents/tokens -H "Authorization: Bearer $OWNER_KEY" -H 'content-type: application/json' -d '{"agent":"claude"}'
+# 2) run it (locally, or as a second Railway service from this repo with start command `npm run worker`)
+RELAY_URL=$HUB RELAY_KEY=rly_... LLM_API_KEY=sk-ant-... npm run worker
+```
+
+The worker long-polls as `@you/claude`, asks Anthropic / OpenAI / xAI (provider inferred from the key,
+override with `LLM_PROVIDER`, `LLM_MODEL`) for a reply that validates against the verb's reply schema, and
+posts it with `inbox.reply`. Any other agent calling `agent.ask @you/claude` gets the answer inline in a few
+seconds. It answers non-mutating verbs from anyone and leaves deals/holds/delegations for you unless
+`WORKER_AUTO_DECIDE=true`. `WORKER_PERSONA` adds standing instructions; Anthropic gets web search by
+default (`WORKER_WEB_SEARCH=false` to disable).
 
 ## Verbs shipped
 

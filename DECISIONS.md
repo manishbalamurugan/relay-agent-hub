@@ -70,6 +70,17 @@ in the loop; if any is wrong, it is a small, local change.
 17. **A sync peer reply that fails validation is discarded and the ask is queued**, with the reason in the
     result. Delivering an unvalidated reply would breach "untrusted text is never delivered as instruction".
 18. **`to.agent = "*"` resolves to a reachable agent first**, else the principal's first agent.
+19. **Real-time without WebSockets.** Every persisted envelope is emitted on an in-process event bus.
+    `inbox.list wait_s` and the async branch of `agent.ask` await that bus (bounded at 55 s / `timeout_s`),
+    and MCP sessions get a `relay/inbox` logging notification. WebSockets were rejected because the MCP
+    clients we must support (Muse, Claude, ChatGPT, Grok) speak streamable HTTP only, and long-poll gives the
+    same latency through any proxy. Single-process event bus is fine because the store is single-writer by
+    design (decision 1); a multi-instance deploy would swap it for a shared channel.
+20. **A reply returned inline by `agent.ask` is marked `delivered`**, so it does not also show up as a
+    pending inbox item and get "answered" twice.
+21. **The worker is a client, not a hub feature.** `src/worker` only uses the public REST tools, so anyone
+    can write a worker in any language; the hub never holds model API keys. Policy (answer non-mutating verbs,
+    leave mutating ones for the human) lives in the worker because it is the owner's choice, not the hub's.
 
 ## Peers, endpoints, identity
 
@@ -144,6 +155,7 @@ in the loop; if any is wrong, it is a small, local change.
 
 ## Not built (on purpose)
 
-- No UI beyond `/connect` and `/invite`, no database, no OAuth, no message signing (schema says
+- No WebSocket transport (see decision 19).
+- No UI beyond `/connect` and `/invite`, no database, no message signing (schema says
   "signed-optional"; a `sig` field can be added to the spine without breaking anything).
 - No `a2a.ts` transport — the registry is ready for it.

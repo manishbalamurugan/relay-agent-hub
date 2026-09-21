@@ -650,6 +650,60 @@ try {
     expect(empty.json.messages.length === 0 && Date.now() - t1 >= 900, "bounded long-poll did not wait");
     await agentMcp.close();
   });
+
+  await step(23, "Extra: Relay Worker — long-polls as @owner/grok, answers via a (mock) model API, agent.ask returns inline within seconds", async () => {
+    // Mock OpenAI-compatible endpoint: echoes the question back in a schema-valid answer.
+    const llmCalls: any[] = [];
+    const llm = createServer((req, res) => {
+      let body = "";
+      req.on("data", d => (body += d));
+      req.on("end", () => {
+        const j = JSON.parse(body);
+        llmCalls.push(j);
+        const userMsg = j.messages.find((m: any) => m.role === "user")?.content ?? "";
+        const q = JSON.parse(userMsg).args?.question ?? "?";
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: `Mock model answering: ${q}`, confidence: 0.9 }) } }] }));
+      });
+    });
+    const llmPort = await freePort();
+    await new Promise<void>(r => llm.listen(llmPort, "127.0.0.1", () => r()));
+
+    const mint = await fetch(`${base}/agents/tokens`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ agent: "grok" }) });
+    const key = ((await mint.json()) as any).token as string;
+    let workerLog = "";
+    const worker = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "worker", "index.ts")], {
+      cwd: root,
+      env: { ...process.env, RELAY_URL: base, RELAY_KEY: key, LLM_PROVIDER: "openai", LLM_API_KEY: "sk-test", OPENAI_BASE_URL: `http://127.0.0.1:${llmPort}`, WORKER_WAIT_S: "20", PORT: "" },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    worker.stdout!.on("data", d => (workerLog += d.toString()));
+    worker.stderr!.on("data", d => (workerLog += d.toString()));
+    try {
+      const deadline = Date.now() + 15_000;
+      while (!workerLog.includes("online as") && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
+      expect(workerLog.includes(`online as ${OWNER}/grok`), `worker did not come online:\n${workerLog}`);
+      await new Promise(r => setTimeout(r, 300)); // let the first long-poll attach
+
+      const t0 = Date.now();
+      const r = await call("agent.ask", { to: `${OWNER}/grok`, verb: "question.freeform", args: { question: "what's for lunch?" }, timeout_s: 20 });
+      const ms = Date.now() - t0;
+      expect(!r.isError && r.data.status === "answered", `expected inline answer, got ${JSON.stringify(r.data).slice(0, 300)}\n${workerLog}`);
+      expect(r.data.reply.args.answer === "Mock model answering: what's for lunch?", `answer: ${r.data.reply.args.answer}`);
+      expect(ms < 8000, `round-trip too slow: ${ms}ms`);
+      expect(llmCalls.length === 1 && /untrusted_peer_note/.test(llmCalls[0].messages[0].content), "model prompt lacks the untrusted-note guard");
+
+      // A mutating verb from the owner must be left for the human, not auto-answered.
+      const d = await call("agent.send", { to: `${OWNER}/grok`, verb: "deal.propose", args: { subject: "sell bike", terms: { price: 100 } } });
+      expect(!d.isError, "deal.propose send failed");
+      await new Promise(r => setTimeout(r, 800));
+      expect(/leave .* for human/.test(workerLog), `worker should skip mutating verbs:\n${workerLog.slice(-600)}`);
+      expect(llmCalls.length === 1, "model should not have been called for a mutating verb");
+    } finally {
+      worker.kill("SIGTERM");
+      await new Promise<void>(r => llm.close(() => r()));
+    }
+  });
 } finally {
   await mcp?.close().catch(() => undefined);
   await stopServer();
