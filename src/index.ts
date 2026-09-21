@@ -1,7 +1,7 @@
 /**
  * Relay — HTTP surface and boot.
  *
- * Public (no auth):   GET /health   GET /openapi.json   GET /connect   GET /invite
+ * Public (no auth):   GET /health   GET /openapi.json   GET /connect   GET /invite   GET /admin (page; API calls need the owner key)
  * Bearer-protected:   POST|GET|DELETE /mcp   POST /tools/<tool>   GET|POST|DELETE /agents
  */
 import { promises as fs } from "node:fs";
@@ -59,7 +59,8 @@ function connectBlock(token: string): string {
     `Connect to Relay. MCP server: ${baseUrl()}/mcp`,
     `Auth header: Authorization: Bearer ${token}`,
     "Ask me for the key using your secure credential prompt.",
-    "Then create a recurring task: every 15 minutes, call inbox.list.",
+    "To reach someone, call agent.ask with timeout_s 60: it returns their answer inline when their agent is listening.",
+    "When I ask you to check Relay, call inbox.list with wait_s 30. If you can run recurring tasks, do that every few minutes too.",
     "If anything needs my decision, summarise it and ask me before replying."
   ].join("\n");
 }
@@ -125,6 +126,15 @@ export function createApp() {
         TOKEN_NOTE: config.tokenWasGenerated ? "(the server generated a temporary token at boot — set RELAY_TOKEN to pin one)" : ""
       });
       res.type("html").send(html);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Owner console: mint invites / agent keys from a browser. Static; the page calls the REST API with the owner key.
+  app.get("/admin", async (_req, res, next) => {
+    try {
+      res.type("html").send(await renderTemplate("admin.html", {}));
     } catch (err) {
       next(err);
     }

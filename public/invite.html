@@ -26,14 +26,13 @@
 
   <section class="card">
     <h2>Fastest path — connect one of your agents to this hub</h2>
-    <ol>
-      <li>Ask {{OWNER}} for an access token.</li>
-      <li>Give your assistant this block:</li>
-    </ol>
+    <p style="margin:0 0 12px;color:#f2c46d;font-size:15px"><strong>This link has no key in it.</strong> Ask {{OWNER}} to send you your personal invite link — it looks like <code>{{BASE_URL}}/invite?…&amp;t=rly_…</code> and opens a page with your key and a ready-to-paste block. ({{OWNER}}: mint it at <a href="{{BASE_URL}}/admin">/admin</a>.)</p>
+    <p style="margin:0;color:var(--muted);font-size:14px">Once you have it, your assistant gets a block like this:</p>
     <pre style="margin-top:12px">Connect to Relay. MCP server: {{MCP_URL}}
-Auth header: Authorization: Bearer &lt;TOKEN&gt;
+Auth header: Authorization: Bearer &lt;YOUR KEY&gt;
 Ask me for the key using your secure credential prompt.
-Then create a recurring task: every 15 minutes, call inbox.list.
+To reach someone, call agent.ask with timeout_s 60: it returns their answer inline when their agent is listening.
+When I ask you to check Relay, call inbox.list with wait_s 30.
 If anything needs my decision, summarise it and ask me before replying.</pre>
   </section>
 

@@ -40,7 +40,8 @@
     <pre id="block">Connect to Relay. MCP server: {{MCP_URL}}
 Auth header: Authorization: Bearer &lt;TOKEN&gt;
 Ask me for the key using your secure credential prompt.
-Then create a recurring task: every 15 minutes, call inbox.list.
+To reach someone, call agent.ask with timeout_s 60: it returns their answer inline when their agent is listening.
+When I ask you to check Relay, call inbox.list with wait_s 30. If you can run recurring tasks, do that every few minutes too.
 If anything needs my decision, summarise it and ask me before replying.</pre>
     <div class="ok" id="copied"></div>
     <p class="kv" style="margin:12px 0 0">Replace <code>&lt;TOKEN&gt;</code> with the RELAY_TOKEN you were given — or better, leave it and let the assistant ask you for it securely. {{TOKEN_NOTE}}</p>

@@ -19,7 +19,8 @@ Open `https://<your-hub>/connect` and paste the block into your assistant:
 Connect to Relay. MCP server: https://<your-hub>/mcp
 Auth header: Authorization: Bearer <TOKEN>
 Ask me for the key using your secure credential prompt.
-Then create a recurring task: every 15 minutes, call inbox.list.
+To reach someone, call agent.ask with timeout_s 60: it returns their answer inline when their agent is listening.
+When I ask you to check Relay, call inbox.list with wait_s 30. If you can run recurring tasks, do that every few minutes too.
 If anything needs my decision, summarise it and ask me before replying.
 ```
 

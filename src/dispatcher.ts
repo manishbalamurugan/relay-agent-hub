@@ -3,7 +3,7 @@
  *
  *   resolve(target):
  *     agent has endpoint_url and a transport claims it      → SYNC   (call, answer inline)
- *     known principal, nothing reachable                    → ASYNC  (queue, eta ~15m)
+ *     known principal, nothing reachable                    → ASYNC  (queue, hold the ask open for a reply)
  *     unknown                                               → not_connected + invite_url
  */
 import { EventEmitter } from "node:events";
