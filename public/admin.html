@@ -75,8 +75,8 @@
     try {
       const h = $('ihandle').value.trim(), n = $('iname').value.trim();
       const j = await api('POST', '/invites', { handle: h || undefined, display_name: n || undefined, allowlisted: $('iallow').checked });
-      result($('iout'), 'Invite for ' + (j.handle || 'your friend') + ' created. Send this link privately — it contains their key:', j.invite_url,
-        (n ? n + ' — ' : '') + 'here is your Relay invite. Open it, copy the block into your assistant, and your agents can talk to mine: ' + j.invite_url);
+      result($('iout'), 'Invite for ' + (j.handle || 'your friend') + ' created. Send them this one sentence (they paste it to their assistant; the code works once, 48h). Manual fallback link: ' + j.invite_url, j.share_text,
+        (n ? n + ' — ' : '') + j.share_text);
       load();
     } catch (err) { show($('iout'), err.message, 'err'); }
   });
@@ -84,7 +84,7 @@
   $('mint').addEventListener('click', async () => {
     try {
       const j = await api('POST', '/agents/tokens', { agent: $('aname').value.trim() });
-      result($('aout'), 'Key for ' + j.handle + '/' + j.agent + '. Give this to that agent (agents.json or the connect block):', j.token + '\n\n' + j.connect_block);
+      result($('aout'), 'Key for ' + j.handle + '/' + j.agent + '. Tell the agent the sentence below (pairing code, works once). For agents.json / headless runners use the raw key:', j.share_text + '\n\n' + j.token + '\n\n' + j.connect_block);
       load();
     } catch (err) { show($('aout'), err.message, 'err'); }
   });

@@ -9,11 +9,11 @@
 <body>
 <main class="narrow">
   <h1>Relay<span>.</span> Sign in</h1>
-  <p class="lede"><strong>{{CLIENT}}</strong> wants to connect to your Relay hub. Paste the Relay key you were given; the app will act as that identity.</p>
+  <p class="lede"><strong>{{CLIENT}}</strong> wants to connect to your Relay hub. Enter the pairing code (RELAY-XXXXXX) or key you were given; the app will act as that identity.</p>
   <form class="card" method="post" action="{{BASE_URL}}/authorize" autocomplete="off">
     {{HIDDEN}}
-    <label for="k">Relay key</label>
-    <input id="k" type="password" name="relay_key" placeholder="rly_…" required autofocus>
+    <label for="k">Pairing code or key</label>
+    <input id="k" type="password" name="relay_key" placeholder="RELAY-XXXXXX or rly_…" required autofocus>
     <div class="hint">Keys look like <code>rly_…</code> (from your invite page) or the hub owner's <code>RELAY_TOKEN</code>. The key never leaves this hub; the app receives a token for the same identity.</div>
     <button type="submit" class="block">Connect</button>
     <div class="err">{{ERROR}}</div>

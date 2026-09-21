@@ -12,9 +12,11 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import express, { type Request, type Response, type Router } from "express";
+import { looksLikeCode, redeemPairing } from "./admin.js";
 import { checkToken } from "./auth.js";
 import { baseUrl } from "./config.js";
 import { escapeHtml as esc, page } from "./http.js";
+import { RelayError } from "./types.js";
 
 const FIELDS = ["client_id", "redirect_uri", "code_challenge", "state", "scope"] as const;
 
@@ -129,10 +131,20 @@ export function oauthRouter(): Router {
       res.status(400).json({ error: "invalid_request" });
       return;
     }
-    const key = (b.relay_key ?? "").trim().replace(/^bearer\s+/i, "");
+    let key = (b.relay_key ?? "").trim().replace(/^bearer\s+/i, "");
+    if (looksLikeCode(key)) {
+      // A pairing code: mint the key it stands for and sign in with that. The person never sees a token.
+      try {
+        key = (await redeemPairing(key)).token;
+      } catch (err) {
+        const msg = err instanceof RelayError ? err.message : "That code did not work.";
+        res.status(401).type("html").send(await authorizePage(b, clients.get(b.client_id)?.name ?? "the client", msg));
+        return;
+      }
+    }
     const caller = checkToken(key);
     if (!caller) {
-      res.status(401).type("html").send(await authorizePage(b, clients.get(b.client_id)?.name ?? "the client", "That key was not recognised. Check for typos or ask the hub owner for a new one."));
+      res.status(401).type("html").send(await authorizePage(b, clients.get(b.client_id)?.name ?? "the client", "That key or code was not recognised. Check for typos or ask the hub owner for a new one."));
       return;
     }
     const code = `ac_${b64url(randomBytes(24))}`;

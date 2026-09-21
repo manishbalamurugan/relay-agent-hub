@@ -10,10 +10,56 @@ import { baseUrl } from "./config.js";
 import { normaliseHandle } from "./dispatcher.js";
 import { store } from "./store.js";
 import { RelayError } from "./types.js";
-import type { AgentRecord, Principal, StoreData } from "./types.js";
-import { connectBlock, wrap } from "./http.js";
+import type { AgentRecord, Pairing, Principal, StoreData } from "./types.js";
+import { connectBlock, shareText, wrap } from "./http.js";
 
 export const newToken = (): string => `rly_${randomBytes(24).toString("base64url")}`;
+
+/** Pairing codes are what humans pass around: short, single-use, expire in 48h, never a bearer token. */
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
+export const PAIR_TTL_MS = 48 * 60 * 60 * 1000;
+export function newPairCode(): string {
+  const bytes = randomBytes(6);
+  let s = "";
+  for (const b of bytes) s += CODE_ALPHABET[b % CODE_ALPHABET.length];
+  return `RELAY-${s}`;
+}
+export const normaliseCode = (raw: unknown): string => String(raw ?? "").trim().toUpperCase().replace(/^RELAY[-\s]?/, "").replace(/[^A-Z0-9]/g, "");
+export function createPairing(d: StoreData, p: Omit<Pairing, "created_at" | "expires_at">): string {
+  const code = newPairCode();
+  d.pairings[hashToken(normaliseCode(code))] = { ...p, created_at: now(), expires_at: new Date(Date.now() + PAIR_TTL_MS).toISOString() };
+  return code;
+}
+function sweepPairings(d: StoreData): void {
+  const t = Date.now();
+  for (const [k, p] of Object.entries(d.pairings)) if (Date.parse(p.expires_at) < t) delete d.pairings[k];
+}
+export const looksLikeCode = (s: string): boolean => /^RELAY[-\s]?[A-Z2-9]{6}$/i.test(s.trim());
+
+/** Burn a pairing code and mint the key it stood for. Open invites need a handle from the person pairing. */
+export async function redeemPairing(rawCode: string, opts: { handle?: unknown; agent?: unknown; display_name?: unknown } = {}): Promise<{ token: string; handle: string; agent: string }> {
+  const code = normaliseCode(rawCode);
+  if (code.length < 6) throw new RelayError(400, "code looks like RELAY-XXXXXX");
+  const key = hashToken(code);
+  const token = newToken();
+  return store.mutate(d => {
+    sweepPairings(d);
+    const p = d.pairings[key];
+    if (!p) throw new RelayError(404, "pairing code not found, already used, or expired — ask for a new one", { start: `${baseUrl()}/start.md` });
+    if (!p.handle && !(typeof opts.handle === "string" && opts.handle.trim())) throw new RelayError(400, "handle required: this is an open invite, ask the user what name they want", { field: "handle" });
+    delete d.pairings[key];
+    const handle = p.handle || claimHandle(String(opts.handle));
+    const agent = p.agent ?? slug(opts.agent, "muse");
+    const displayName = typeof opts.display_name === "string" && opts.display_name.trim() ? opts.display_name.trim().slice(0, 80) : p.display_name;
+    if (handle === d.owner.handle) {
+      d.tokens[hashToken(token)] = { handle, agent, label: p.label ?? `owner agent ${agent}`, created_at: now() };
+      if (!d.owner.agents.some(a => a.name === agent)) d.owner.agents.push({ name: agent });
+    } else {
+      bindToken(d, token, handle, [agent], displayName, p.label ?? "paired", Boolean(p.allowlisted));
+    }
+    return { token, handle, agent };
+  });
+}
 export const inviteLink = (handle: string, token: string): string => `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(token)}`;
 const now = () => new Date().toISOString();
 const body = (req: Request): Record<string, unknown> => (req.body ?? {}) as Record<string, unknown>;
@@ -68,14 +114,56 @@ export function adminRouter(): Router {
       const b = body(req);
       const token = newToken();
       const label = typeof b.label === "string" ? b.label : undefined;
+      const displayName = typeof b.display_name === "string" ? b.display_name : undefined;
+      const allowlisted = Boolean(b.allowlisted);
       if (typeof b.handle !== "string" || !b.handle.trim()) {
-        await store.mutate(d => void (d.tokens[hashToken(token)] = { handle: "", label, created_at: now() }));
-        return { ok: true, handle: null, token, invite_url: `${baseUrl()}/invite?t=${encodeURIComponent(token)}`, note: "Open invite: the person chooses their handle when they open it." };
+        const code = await store.mutate(d => {
+          d.tokens[hashToken(token)] = { handle: "", label, created_at: now() };
+          return createPairing(d, { handle: "", display_name: displayName, label, allowlisted });
+        });
+        return {
+          ok: true,
+          handle: null,
+          code,
+          share_text: shareText(code),
+          token,
+          invite_url: `${baseUrl()}/invite?t=${encodeURIComponent(token)}`,
+          note: "Open invite: send share_text (they tell their assistant, it pairs and picks their handle). invite_url is the manual fallback and contains a key."
+        };
       }
       const handle = claimHandle(b.handle);
       const agents = Array.isArray(b.agents) ? b.agents.map(String).filter(Boolean) : ["muse"];
-      await store.mutate(d => bindToken(d, token, handle, agents, typeof b.display_name === "string" ? b.display_name : undefined, label, Boolean(b.allowlisted)));
-      return { ok: true, handle, token, invite_url: inviteLink(handle, token), connect_block: connectBlock(token), note: "Send invite_url privately; it contains their key." };
+      const code = await store.mutate(d => {
+        bindToken(d, token, handle, agents, displayName, label, allowlisted);
+        return createPairing(d, { handle, agent: agents[0], display_name: displayName, label, allowlisted });
+      });
+      return {
+        ok: true,
+        handle,
+        code,
+        share_text: shareText(code),
+        token,
+        invite_url: inviteLink(handle, token),
+        connect_block: connectBlock(token),
+        note: "Send share_text; their assistant pairs with the code and never sees a raw key in chat. invite_url is the manual fallback."
+      };
+    })
+  );
+
+  // Public: an assistant exchanges a pairing code for a key. One shot; the code dies on use or after 48h.
+  r.post(
+    "/pair",
+    wrap(async req => {
+      const b = body(req);
+      const out = await redeemPairing(String(b.code ?? ""), { handle: b.handle, agent: b.agent, display_name: b.display_name });
+      return {
+        ok: true,
+        ...out,
+        mcp_url: `${baseUrl()}/mcp`,
+        auth_header: `Authorization: Bearer ${out.token}`,
+        hub_owner: store.snapshot.owner.handle,
+        next: "Store the token in your MCP/connector config (never repeat it in chat), connect, then call identity.whoami."
+      };
     })
   );
 
@@ -171,12 +259,14 @@ export function adminRouter(): Router {
       const agent = slug(b.agent);
       if (agent.length < 2) throw new RelayError(400, "agent name is required, e.g. claude-code");
       const token = newToken();
-      await store.mutate(d => {
+      const label = typeof b.label === "string" ? b.label : `owner agent ${agent}`;
+      const code = await store.mutate(d => {
         if (!d.owner.agents.some(a => a.name === agent)) d.owner.agents.push({ name: agent });
         if (b.rotate === true) revokeWhere(d, t => t.handle === d.owner.handle && t.agent === agent);
-        d.tokens[hashToken(token)] = { handle: d.owner.handle, agent, label: typeof b.label === "string" ? b.label : `owner agent ${agent}`, created_at: now() };
+        d.tokens[hashToken(token)] = { handle: d.owner.handle, agent, label, created_at: now() };
+        return createPairing(d, { handle: d.owner.handle, agent, label });
       });
-      return { ok: true, handle: store.snapshot.owner.handle, agent, token, connect_block: connectBlock(token) };
+      return { ok: true, handle: store.snapshot.owner.handle, agent, token, code, share_text: shareText(code), connect_block: connectBlock(token) };
     })
   );
 

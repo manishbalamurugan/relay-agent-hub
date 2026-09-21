@@ -4,7 +4,7 @@
  * agent registry, REST auth). Run with `npm test`. Exit code 1 on any failure.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { promises as fs } from "node:fs";
@@ -579,7 +579,6 @@ try {
     }
   });
   await step(21, "Extra: OAuth 2.1 sign-in (discovery → DCR → authorize with Relay key → PKCE token) yields a working bearer", async () => {
-    const { createHash, randomBytes } = await import("node:crypto");
     const unauth = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     const www = unauth.headers.get("www-authenticate") ?? "";
     expect(unauth.status === 401 && www.includes("resource_metadata="), `challenge header: ${www}`);
@@ -594,7 +593,7 @@ try {
     const challenge = createHash("sha256").update(verifier).digest("base64url");
     const authUrl = `${asm.authorization_endpoint}?response_type=code&client_id=${client.client_id}&redirect_uri=${encodeURIComponent("https://claude.ai/api/mcp/auth_callback")}&code_challenge=${challenge}&code_challenge_method=S256&state=xyz&scope=relay`;
     const page = await fetch(authUrl);
-    expect(page.status === 200 && (await page.text()).includes("Relay key"), "authorize page");
+    expect(page.status === 200 && (await page.text()).includes("Pairing code or key"), "authorize page");
     const form = new URLSearchParams({ client_id: client.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_challenge: challenge, state: "xyz", scope: "relay", relay_key: `Bearer ${TOKEN}` });
     const wrong = await fetch(`${base}/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ...Object.fromEntries(form), relay_key: "rly_nope" }), redirect: "manual" });
     expect(wrong.status === 401, `wrong key should re-render form: ${wrong.status}`);
@@ -824,6 +823,53 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
     const after = await admin("GET", "/agents");
     expect(after.json.owner.agents.map((a: any) => a.name).sort().join() === "claude-code,muse", `agents resurrected on restart: ${after.json.owner.agents.map((a: any) => a.name)}`);
     mcp = await connectMcp();
+  });
+  await step(25, "Extra: one-sentence onboarding — /start.md is served for agents, pairing codes swap for keys once, open invites ask for a name, OAuth accepts a code", async () => {
+    const start = await fetch(`${base}/start.md`);
+    const md = await start.text();
+    expect(start.status === 200 && (start.headers.get("content-type") ?? "").includes("markdown"), `start.md ${start.status}`);
+    expect(md.includes(`${base}/pair`) && md.includes(`${base}/mcp`) && md.includes("`question.freeform`") && !md.includes("{{"), "start.md missing pair/mcp/verbs or has unrendered vars");
+    const rest = (path: string, body: unknown, key?: string) =>
+      fetch(`${base}${path}`, { method: "POST", headers: { ...(key ? { Authorization: `Bearer ${key}` } : {}), "content-type": "application/json" }, body: JSON.stringify(body) }).then(async r => ({ status: r.status, json: (await r.json()) as any }));
+    // Bound invite: the human gets one sentence with a code, never a token.
+    const inv = await rest("/invites", { handle: "@pal", display_name: "Pal" }, TOKEN);
+    expect(inv.status === 200 && /^RELAY-[A-Z2-9]{6}$/.test(inv.json.code), `invite code ${JSON.stringify(inv.json)}`);
+    expect(inv.json.share_text.includes(inv.json.code) && inv.json.share_text.includes("/start.md") && !inv.json.share_text.includes("rly_"), `share_text leaks or is incomplete: ${inv.json.share_text}`);
+    const paired = await rest("/pair", { code: inv.json.code.toLowerCase() });
+    expect(paired.status === 200 && paired.json.token?.startsWith("rly_") && paired.json.handle === "@pal" && paired.json.mcp_url === `${base}/mcp`, `pair ${JSON.stringify(paired.json)}`);
+    const who = await rest("/tools/identity.whoami", {}, paired.json.token);
+    expect(who.json.owner === "@pal" && who.json.acting_as === "muse" && who.json.display_name === "Pal", `paired whoami ${JSON.stringify(who.json).slice(0, 200)}`);
+    const again = await rest("/pair", { code: inv.json.code });
+    expect(again.status === 404, `code must be single-use, got ${again.status}`);
+    expect((await rest("/pair", { code: "RELAY-NOPE22" })).status === 404 && (await rest("/pair", { code: "x" })).status === 400, "bad codes must be rejected");
+    // Open invite: the assistant must ask the person for a name.
+    const open = await rest("/invites", {}, TOKEN);
+    const noName = await rest("/pair", { code: open.json.code });
+    expect(noName.status === 400 && /handle required/.test(noName.json.error ?? ""), `open pair without handle ${JSON.stringify(noName.json)}`);
+    const named = await rest("/pair", { code: open.json.code, handle: "Jo Bloggs", display_name: "Jo", agent: "chatgpt" });
+    expect(named.status === 200 && named.json.handle === "@jo-bloggs" && named.json.agent === "chatgpt", `open pair ${JSON.stringify(named.json)}`);
+    // Owner agent key via code: acts as @owner/<agent>, not admin.
+    const mint = await rest("/agents/tokens", { agent: "grok" }, TOKEN);
+    const g = await rest("/pair", { code: mint.json.code });
+    const gwho = await rest("/tools/identity.whoami", {}, g.json.token);
+    expect(g.status === 200 && gwho.json.owner === OWNER && gwho.json.acting_as === "grok" && gwho.json.role !== "hub owner", `owner agent pair ${JSON.stringify(gwho.json).slice(0, 160)}`);
+    expect((await fetch(`${base}/agents`, { headers: { Authorization: `Bearer ${g.json.token}` } })).status === 403, "agent key must not be admin");
+    // OAuth sign-in accepts a pairing code in place of a key (Claude mobile path).
+    const inv2 = await rest("/invites", { handle: "@oauthpal" }, TOKEN);
+    const asm = (await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json()) as any;
+    const reg = (await (await fetch(asm.registration_endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "t", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] }) })).json()) as any;
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const form = new URLSearchParams({ client_id: reg.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_challenge: challenge, state: "s", scope: "relay", relay_key: inv2.json.code });
+    const ok = await fetch(`${base}/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form, redirect: "manual" });
+    expect(ok.status === 302, `oauth with pairing code: ${ok.status}`);
+    const ac = new URL(ok.headers.get("location")!).searchParams.get("code")!;
+    const tok = (await (await fetch(asm.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code: ac, client_id: reg.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_verifier: verifier }) })).json()) as any;
+    const owho = await rest("/tools/identity.whoami", {}, tok.access_token);
+    expect(owho.json.owner === "@oauthpal", `oauth-paired identity ${JSON.stringify(owho.json).slice(0, 120)}`);
+    // Pairings survive restart until used; store never holds a raw token or code.
+    const raw = JSON.parse(await fs.readFile(DATA_FILE, "utf8"));
+    expect(!JSON.stringify(raw).includes("RELAY-") && !JSON.stringify(raw).includes(paired.json.token), "store leaks a code or token");
   });
 } finally {
   await mcp?.close().catch(() => undefined);

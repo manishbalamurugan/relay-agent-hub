@@ -95,6 +95,19 @@ export interface StoreData {
   envelopes: StoredEnvelope[];
   /** sha256(token) -> who it acts for. Minted via POST /invites. */
   tokens: Record<string, TokenRecord>;
+  /** sha256(pairing code) -> what a fresh key should be bound to. Single use; the code is all a human ever sees. */
+  pairings: Record<string, Pairing>;
+}
+
+export interface Pairing {
+  /** Empty string: the person picks their handle when they pair (open invite). */
+  handle: string;
+  agent?: string;
+  display_name?: string;
+  label?: string;
+  allowlisted?: boolean;
+  created_at: string;
+  expires_at: string;
 }
 
 export interface TokenRecord {

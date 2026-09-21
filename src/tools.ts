@@ -96,7 +96,7 @@ export function buildTools(): ToolDef[] {
       return {
         owner: ctx.handle,
         acting_as: actingAgent(undefined, ctx),
-        role: ctx.admin ? "hub owner" : "guest on " + d.owner.handle + "'s hub",
+        role: ctx.admin ? "hub owner" : ctx.handle === d.owner.handle ? "one of the hub owner's agents" : "guest on " + d.owner.handle + "'s hub",
         agents: (me?.agents ?? []).map(a => agentView(ctx.handle, a, "own")),
         display_name: me?.display_name ?? null,
         peers: others.map(p => ({ handle: p.handle, person: p.display_name ?? null, allowlisted: Boolean(p.allowlisted), agents: p.agents.map(a => agentView(p.handle, a, "peer")) })),

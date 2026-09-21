@@ -13,7 +13,8 @@ function emptyData(): StoreData {
     owner: { handle: config.ownerHandle, agents: [] },
     peers: [],
     envelopes: [],
-    tokens: {}
+    tokens: {},
+    pairings: {}
   };
 }
 

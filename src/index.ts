@@ -1,7 +1,7 @@
 /**
  * Relay — HTTP surface and boot.
  *
- * Public:     GET /health  /openapi.json  /connect  /invite  /admin  /relay.css   + OAuth shim (src/oauth.ts)
+ * Public:     GET /health  /openapi.json  /start.md  /connect  /invite  /admin  /relay.css   POST /pair   + OAuth shim (src/oauth.ts)
  * Bearer:     POST|GET|DELETE /mcp   POST /tools/<tool>
  * Owner key:  invites, agent keys, endpoint registry (src/admin.ts)
  */
@@ -16,7 +16,7 @@ import { connectBlock, page, publicDir, wrap } from "./http.js";
 import { handleMcp, sessionCount } from "./mcp.js";
 import { buildOpenApi } from "./openapi.js";
 import { oauthRouter } from "./oauth.js";
-import { loadVerbs, verbNames } from "./registry.js";
+import { listVerbs, loadVerbs, verbNames } from "./registry.js";
 import { store } from "./store.js";
 import { buildTools, runTool } from "./tools.js";
 import { loadTransports } from "./transports/index.js";
@@ -36,6 +36,18 @@ export function createApp() {
   // ---- public ----------------------------------------------------------------------------------
   app.get("/", (_req, res) => res.redirect("/connect"));
   app.get("/relay.css", (_req, res) => res.sendFile(path.join(publicDir, "relay.css")));
+
+  // Agent-facing onboarding. A human forwards one sentence pointing here; the assistant does the rest.
+  app.get(
+    "/start.md",
+    wrap(async (_req, res) => {
+      const owner = store.snapshot.owner.handle;
+      const verbs = listVerbs()
+        .map(v => `- \`${v.verb}\` — ${v.describe}${v.mutating ? " *(needs the user's decision)*" : ""}`)
+        .join("\n");
+      res.type("text/markdown; charset=utf-8").send(await page("start.md", { BASE_URL: baseUrl(), MCP_URL: `${baseUrl()}/mcp`, OWNER: owner, OWNER_BARE: owner.replace(/^@/, ""), VERBS: verbs }));
+    })
+  );
   app.use(oauthRouter());
 
   app.get("/health", (_req, res) => {
