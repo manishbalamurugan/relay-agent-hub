@@ -867,6 +867,10 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
     const tok = (await (await fetch(asm.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code: ac, client_id: reg.client_id, redirect_uri: "https://claude.ai/api/mcp/auth_callback", code_verifier: verifier }) })).json()) as any;
     const owho = await rest("/tools/identity.whoami", {}, tok.access_token);
     expect(owho.json.owner === "@oauthpal", `oauth-paired identity ${JSON.stringify(owho.json).slice(0, 120)}`);
+    // Purge forgets a person entirely; plain revoke keeps them listed.
+    const gone = await fetch(`${base}/invites/@jo-bloggs?purge=true`, { method: "DELETE", headers: { Authorization: `Bearer ${TOKEN}` } }).then(r => r.json()) as any;
+    const still = await rest("/tools/identity.whoami", {}, TOKEN);
+    expect(gone.purged === true && !still.json.peers.some((p: any) => p.handle === "@jo-bloggs") && still.json.peers.some((p: any) => p.handle === "@pal"), "purge should remove only the purged peer");
     // Pairings survive restart until used; store never holds a raw token or code.
     const raw = JSON.parse(await fs.readFile(DATA_FILE, "utf8"));
     expect(!JSON.stringify(raw).includes("RELAY-") && !JSON.stringify(raw).includes(paired.json.token), "store leaks a code or token");

@@ -190,7 +190,16 @@ export function adminRouter(): Router {
     ...admin,
     wrap(async req => {
       const handle = normaliseHandle(String(req.params.handle));
-      return { ok: true, revoked: await store.mutate(d => revokeWhere(d, t => t.handle === handle)) };
+      const purge = String(req.query.purge ?? "") === "true"; // also forget the person: record, pending pairings, their messages
+      return await store.mutate(d => {
+        const revoked = revokeWhere(d, t => t.handle === handle);
+        if (!purge) return { ok: true, revoked };
+        d.peers = d.peers.filter(p => p.handle !== handle);
+        for (const [k, p] of Object.entries(d.pairings)) if (p.handle === handle) delete d.pairings[k];
+        const before = d.envelopes.length;
+        d.envelopes = d.envelopes.filter(e => e.to.handle !== handle && e.from.handle !== handle);
+        return { ok: true, revoked, purged: true, envelopes_removed: before - d.envelopes.length };
+      });
     })
   );
 
