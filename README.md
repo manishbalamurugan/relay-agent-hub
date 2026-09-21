@@ -72,6 +72,9 @@ Targets can be written as `"@bob"`, `"@bob/muse"`, `"codex"` (one of your own ag
 
 ## Real-time delivery (no polling cadence)
 
+Shell-capable agents (Claude Code, Codex, Cursor) can use `scripts/relay.sh` directly; in Claude Code type `/relay-listen` to turn it into an always-on responder.
+
+
 Three mechanisms, all over plain streamable HTTP so they work through any proxy:
 
 1. **Long-poll**: `inbox.list {wait_s: 55}` holds the request open and returns within ~1 s of a message
