@@ -651,8 +651,8 @@ try {
     await agentMcp.close();
   });
 
-  await step(23, "Extra: Relay Worker — long-polls as @owner/grok, answers via a (mock) model API, agent.ask returns inline within seconds", async () => {
-    // Mock OpenAI-compatible endpoint: echoes the question back in a schema-valid answer.
+  await step(23, "Extra: agent runner — api (mock OpenAI), claude-code and codex presets (fake CLIs on PATH) all answer agent.ask inline; mutating verbs left for the human", async () => {
+    // Mock OpenAI-compatible endpoint.
     const llmCalls: any[] = [];
     const llm = createServer((req, res) => {
       let body = "";
@@ -660,72 +660,33 @@ try {
       req.on("end", () => {
         const j = JSON.parse(body);
         llmCalls.push(j);
-        const userMsg = j.messages.find((m: any) => m.role === "user")?.content ?? "";
-        const q = JSON.parse(userMsg).args?.question ?? "?";
+        const q = JSON.parse(j.messages.find((m: any) => m.role === "user").content.split("\n\n")[1]).args?.question ?? "?";
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: `Mock model answering: ${q}`, confidence: 0.9 }) } }] }));
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: `mock api: ${q}`, confidence: 0.9 }) } }] }));
       });
     });
     const llmPort = await freePort();
     await new Promise<void>(r => llm.listen(llmPort, "127.0.0.1", () => r()));
 
-    const mint = await fetch(`${base}/agents/tokens`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ agent: "grok" }) });
-    const key = ((await mint.json()) as any).token as string;
-    let workerLog = "";
-    const worker = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "worker", "index.ts")], {
-      cwd: root,
-      env: { ...process.env, RELAY_URL: base, RELAY_KEY: key, LLM_PROVIDER: "openai", LLM_API_KEY: "sk-test", OPENAI_BASE_URL: `http://127.0.0.1:${llmPort}`, WORKER_WAIT_S: "20", PORT: "" },
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    worker.stdout!.on("data", d => (workerLog += d.toString()));
-    worker.stderr!.on("data", d => (workerLog += d.toString()));
-    try {
-      const deadline = Date.now() + 15_000;
-      while (!workerLog.includes("online as") && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
-      expect(workerLog.includes(`online as ${OWNER}/grok`), `worker did not come online:\n${workerLog}`);
-      await new Promise(r => setTimeout(r, 300)); // let the first long-poll attach
-
-      const t0 = Date.now();
-      const r = await call("agent.ask", { to: `${OWNER}/grok`, verb: "question.freeform", args: { question: "what's for lunch?" }, timeout_s: 20 });
-      const ms = Date.now() - t0;
-      expect(!r.isError && r.data.status === "answered", `expected inline answer, got ${JSON.stringify(r.data).slice(0, 300)}\n${workerLog}`);
-      expect(r.data.reply.args.answer === "Mock model answering: what's for lunch?", `answer: ${r.data.reply.args.answer}`);
-      expect(ms < 8000, `round-trip too slow: ${ms}ms`);
-      expect(llmCalls.length === 1 && /untrusted_peer_note/.test(llmCalls[0].messages[0].content), "model prompt lacks the untrusted-note guard");
-
-      // A mutating verb from the owner must be left for the human, not auto-answered.
-      const d = await call("agent.send", { to: `${OWNER}/grok`, verb: "deal.propose", args: { subject: "sell bike", terms: { price: 100 } } });
-      expect(!d.isError, "deal.propose send failed");
-      await new Promise(r => setTimeout(r, 800));
-      expect(/leave .* for human/.test(workerLog), `worker should skip mutating verbs:\n${workerLog.slice(-600)}`);
-      expect(llmCalls.length === 1, "model should not have been called for a mutating verb");
-    } finally {
-      worker.kill("SIGTERM");
-      await new Promise<void>(r => llm.close(() => r()));
-    }
-  });
-  await step(24, "Extra: Relay Bridge — runs vendor CLIs (fake `claude` + `codex` on PATH) headless; both answer agent.ask inline", async () => {
-    // Fake vendor CLIs that behave like the real headless modes.
+    // Fake vendor CLIs mirroring the real headless flag shapes.
     const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "relay-fakebin-"));
+    const q = `q=$(printf '%s' "$prompt" | grep -o '"question": "[^"]*"' | head -1 | sed 's/"question": "//; s/"$//')`;
     await fs.writeFile(
       path.join(binDir, "claude"),
       `#!/usr/bin/env bash
-# expects: -p <prompt> --output-format json --json-schema <schema> [extra]
-prompt="$2"; [ "$3" = "--output-format" ] && [ "$4" = "json" ] || { echo "bad flags: $*" >&2; exit 2; }
-[ "$5" = "--json-schema" ] || { echo "missing --json-schema" >&2; exit 2; }
-q=$(printf '%s' "$prompt" | grep -o '"question": "[^"]*"' | head -1 | sed 's/"question": "//; s/"$//')
+prompt="$2"; [ "$3" = "--output-format" ] && [ "$4" = "json" ] && [ "$5" = "--json-schema" ] || { echo "bad flags: $*" >&2; exit 2; }
+${q}
 printf '{"type":"result","result":"ok","structured_output":{"answer":"fake claude (cwd %s): %s","confidence":0.8}}\\n' "$(basename "$PWD")" "$q"
 `
     );
     await fs.writeFile(
       path.join(binDir, "codex"),
       `#!/usr/bin/env bash
-# expects: exec --ephemeral --skip-git-repo-check --output-schema <file> -o <last> [--sandbox read-only] <prompt>
 [ "$1" = "exec" ] || exit 2
 last=""; schema=""; prompt="\${@: -1}"
 while [ $# -gt 0 ]; do case "$1" in -o) last="$2"; shift;; --output-schema) schema="$2"; shift;; esac; shift; done
 [ -f "$schema" ] || { echo "no schema file" >&2; exit 2; }
-q=$(printf '%s' "$prompt" | grep -o '"question": "[^"]*"' | head -1 | sed 's/"question": "//; s/"$//')
+${q}
 printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat "$last"
 `
     );
@@ -734,45 +695,55 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
 
     const mintKey = async (agent: string) =>
       (((await (await fetch(`${base}/agents/tokens`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ agent }) })).json()) as any).token as string);
-    const kClaude = await mintKey("claude-code");
-    const kCodex = await mintKey("codex");
-    const cfgFile = path.join(binDir, "bridge.config.json");
+    const cfgFile = path.join(binDir, "agents.json");
     await fs.writeFile(
       cfgFile,
       JSON.stringify({
         hub: base,
         agents: [
+          { name: "grok", key: await mintKey("grok"), preset: "api", provider: "openai", api_key: "$FAKE_LLM_KEY", base_url: `http://127.0.0.1:${llmPort}` },
           { name: "claude-code", key: "$K_CLAUDE", preset: "claude-code", cwd: root, extra_args: ["--allowedTools", "Read"] },
-          { name: "codex", key: kCodex, preset: "codex", cwd: root, timeout_s: 30 }
+          { name: "codex", key: await mintKey("codex"), preset: "codex", cwd: root, timeout_s: 30 }
         ]
       })
     );
-    let blog = "";
-    const bridge = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "bridge", "index.ts")], {
+    let alog = "";
+    const runner = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "agent", "index.ts")], {
       cwd: root,
-      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, BRIDGE_CONFIG: cfgFile, K_CLAUDE: kClaude, PORT: "" },
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, AGENT_CONFIG: cfgFile, K_CLAUDE: await mintKey("claude-code"), FAKE_LLM_KEY: "sk-test", PORT: "" },
       stdio: ["ignore", "pipe", "pipe"]
     });
-    bridge.stdout!.on("data", d => (blog += d.toString()));
-    bridge.stderr!.on("data", d => (blog += d.toString()));
+    runner.stdout!.on("data", d => (alog += d.toString()));
+    runner.stderr!.on("data", d => (alog += d.toString()));
     try {
       const deadline = Date.now() + 15_000;
-      while (!(blog.includes("[bridge:claude-code] online") && blog.includes("[bridge:codex] online")) && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
-      expect(blog.includes(`online as ${OWNER}/claude-code`) && blog.includes(`online as ${OWNER}/codex`), `bridge did not come online:\n${blog}`);
+      while ((alog.match(/online as/g) ?? []).length < 3 && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
+      for (const n of ["grok", "claude-code", "codex"]) expect(alog.includes(`online as ${OWNER}/${n}`), `${n} not online:\n${alog}`);
       await new Promise(r => setTimeout(r, 300));
 
-      const [rc, rx] = await Promise.all([
+      const t0 = Date.now();
+      const [rg, rc, rx] = await Promise.all([
+        call("agent.ask", { to: `${OWNER}/grok`, verb: "question.freeform", args: { question: "what's for lunch?" }, timeout_s: 20 }),
         call("agent.ask", { to: `${OWNER}/claude-code`, verb: "question.freeform", args: { question: "how does auth work" }, timeout_s: 20 }),
         call("agent.ask", { to: `${OWNER}/codex`, verb: "question.freeform", args: { question: "list the verbs" }, timeout_s: 20 })
       ]);
-      expect(!rc.isError && rc.data.status === "answered", `claude-code not answered inline: ${JSON.stringify(rc.data).slice(0, 300)}\n${blog}`);
+      const ms = Date.now() - t0;
+      for (const [n, r] of [["grok", rg], ["claude-code", rc], ["codex", rx]] as const) expect(!r.isError && r.data.status === "answered", `${n} not answered inline: ${JSON.stringify(r.data).slice(0, 300)}\n${alog}`);
+      expect(rg.data.reply.args.answer === "mock api: what's for lunch?", `api answer: ${rg.data.reply.args.answer}`);
       expect(rc.data.reply.args.answer === `fake claude (cwd ${path.basename(root)}): how does auth work`, `claude answer: ${rc.data.reply.args.answer}`);
-      expect(!rx.isError && rx.data.status === "answered", `codex not answered inline: ${JSON.stringify(rx.data).slice(0, 300)}\n${blog}`);
       expect(rx.data.reply.args.answer === "fake codex: list the verbs", `codex answer: ${rx.data.reply.args.answer}`);
-      // Fan-out: the two asks ran concurrently and each agent handled exactly one.
-      expect((blog.match(/answered env_/g) ?? []).length === 2, `expected 2 answered lines\n${blog}`);
+      expect(ms < 8000, `fan-out too slow: ${ms}ms`);
+      expect(llmCalls.length === 1 && /untrusted_peer_note/.test(llmCalls[0].messages[0].content), "api prompt lacks the untrusted-note guard");
+
+      // A mutating verb must be left for the human, never auto-answered.
+      const d = await call("agent.send", { to: `${OWNER}/grok`, verb: "deal.propose", args: { subject: "sell bike", terms: { price: 100 } } });
+      expect(!d.isError, "deal.propose send failed");
+      await new Promise(r => setTimeout(r, 800));
+      expect(/left for human/.test(alog), `runner should skip mutating verbs:\n${alog.slice(-600)}`);
+      expect(llmCalls.length === 1, "model should not have been called for a mutating verb");
     } finally {
-      bridge.kill("SIGTERM");
+      runner.kill("SIGTERM");
+      await new Promise<void>(r => llm.close(() => r()));
       await fs.rm(binDir, { recursive: true, force: true });
     }
   });

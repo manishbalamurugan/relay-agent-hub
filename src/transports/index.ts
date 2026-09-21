@@ -32,10 +32,6 @@ export async function loadTransports(): Promise<Transport[]> {
   return transports;
 }
 
-export function listTransports(): Transport[] {
-  return [...transports];
-}
-
 /** First transport that claims the agent, or undefined when the agent is not reachable. */
 export function transportFor(agent: AgentRecord | undefined): Transport | undefined {
   if (!agent?.endpoint_url) return undefined;

@@ -4,24 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Relay — sign in</title>
-<style>
-  :root { color-scheme: dark; --bg:#0b0d12; --card:#12161f; --line:#232a37; --fg:#e6e9ef; --muted:#8b94a7; --accent:#7cc4ff; --err:#ff8a80; }
-  * { box-sizing: border-box; }
-  body { margin:0; font: 16px/1.55 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: radial-gradient(1200px 600px at 20% -10%, #17203a 0%, var(--bg) 60%); color: var(--fg); }
-  main { max-width: 520px; margin: 0 auto; padding: 56px 20px 80px; }
-  h1 { font-size: 30px; letter-spacing: -0.02em; margin: 0 0 6px; } h1 span { color: var(--accent); }
-  .lede { color: var(--muted); margin: 0 0 24px; font-size: 16px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px 24px; }
-  label { display:block; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 4px 0 6px; }
-  input[type=text], input[type=password] { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--line); background: #0a0d14; color: var(--fg); font: 15px ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
-  button { margin-top: 18px; width: 100%; background: var(--accent); color: #05101c; border: 0; border-radius: 8px; padding: 12px 14px; font-weight: 600; cursor: pointer; font-size: 16px; }
-  .err { color: var(--err); font-size: 14px; min-height: 1.2em; margin-top: 10px; }
-  code { background: #0a0d14; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 13px; }
-</style>
+<link rel="stylesheet" href="/relay.css">
 </head>
 <body>
-<main>
+<main class="narrow">
   <h1>Relay<span>.</span> Sign in</h1>
   <p class="lede"><strong>{{CLIENT}}</strong> wants to connect to your Relay hub. Paste the Relay key you were given; the app will act as that identity.</p>
   <form class="card" method="post" action="{{BASE_URL}}/authorize" autocomplete="off">
@@ -29,7 +15,7 @@
     <label for="k">Relay key</label>
     <input id="k" type="password" name="relay_key" placeholder="rly_…" required autofocus>
     <div class="hint">Keys look like <code>rly_…</code> (from your invite page) or the hub owner's <code>RELAY_TOKEN</code>. The key never leaves this hub; the app receives a token for the same identity.</div>
-    <button type="submit">Connect</button>
+    <button type="submit" class="block">Connect</button>
     <div class="err">{{ERROR}}</div>
   </form>
 </main>

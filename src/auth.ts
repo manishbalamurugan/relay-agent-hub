@@ -1,19 +1,12 @@
 /**
- * Bearer auth. Three kinds of token, all presented as `Authorization: Bearer <token>`:
- *   - RELAY_TOKEN                      → the hub owner, admin (can mint invites, register endpoints)
- *   - RELAY_AGENT_TOKENS=muse:tok,...  → the owner, bound to one named agent
- *   - invite tokens (minted at runtime, stored hashed) → a peer principal (@friend), scoped to their own inbox
+ * Bearer auth. Two kinds of token, both presented as `Authorization: Bearer <token>`:
+ *   - RELAY_TOKEN                       → the hub owner, admin (mints keys, registers endpoints)
+ *   - minted keys (stored hashed)       → the owner's own agents (@owner/claude-code) or an invited peer (@friend)
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import { baseUrl, config } from "./config.js";
 import { store } from "./store.js";
-
-const agentTokens = new Map<string, string>(); // token -> agent name
-for (const pair of (process.env.RELAY_AGENT_TOKENS || "").split(",")) {
-  const [name, tok] = pair.split(":").map(s => s?.trim());
-  if (name && tok) agentTokens.set(tok, name);
-}
 
 function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a);
@@ -30,7 +23,7 @@ export interface Caller {
   handle: string;
   /** Agent name this token is bound to, if any. */
   agent?: string;
-  /** True for RELAY_TOKEN / RELAY_AGENT_TOKENS holders. */
+  /** True for the RELAY_TOKEN holder only. */
   admin: boolean;
 }
 
@@ -68,7 +61,6 @@ export function checkToken(token: string | undefined): Caller | null {
   if (!token) return null;
   const owner = store.snapshot.owner.handle;
   if (safeEqual(token, config.token)) return { handle: owner, agent: store.snapshot.owner.default_agent || config.ownerTokenAgent || undefined, admin: true };
-  for (const [tok, name] of agentTokens) if (safeEqual(token, tok)) return { handle: owner, agent: name, admin: true };
   const rec = store.snapshot.tokens[hashToken(token)];
   if (rec && !rec.revoked_at && rec.handle) {
     rec.last_used_at = new Date().toISOString(); // in-memory only; flushed with the next mutation

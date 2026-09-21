@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+# Relay Agent image: runs your vendor CLIs (Claude Code, Codex) or a model API as always-on Relay agents.
+# Deploy as a second Railway service from this repo with Dockerfile path = Dockerfile.agent.
+# Env: RELAY_URL, RELAY_KEY (agent key from /admin), AGENT_NAME (default claude-code), AGENT_PRESET, and auth:
+#   CLAUDE_CODE_OAUTH_TOKEN  (claude setup-token — Pro/Max subscription)   or ANTHROPIC_API_KEY
+#   CODEX_AUTH_JSON          (contents of ~/.codex/auth.json) for AGENT_PRESET=codex
+#   LLM_API_KEY              for AGENT_PRESET=api
+# Several agents: mount/commit an agents.json and set AGENT_CONFIG. AGENT_REPO clones a git URL as the workspace.
+FROM node:20-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci --no-audit --no-fund
+COPY src ./src
+RUN npm run build
+
+FROM node:20-slim
+ENV NODE_ENV=production
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl ripgrep && rm -rf /var/lib/apt/lists/* \
+ && npm install -g @anthropic-ai/claude-code @openai/codex && npm cache clean --force
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+COPY --from=build /app/dist ./dist
+COPY . /work
+ENV AGENT_CWD=/work
+CMD ["sh", "-c", "if [ -n \"$AGENT_REPO\" ]; then git clone --depth 1 \"$AGENT_REPO\" /work-repo && export AGENT_CWD=/work-repo; fi; exec node dist/agent/index.js"]

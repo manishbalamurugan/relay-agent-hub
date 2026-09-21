@@ -1,10 +1,5 @@
 import { randomBytes } from "node:crypto";
 
-function normaliseHandle(h: string): string {
-  const t = h.trim();
-  if (!t) return "@owner";
-  return t.startsWith("@") ? t : `@${t}`;
-}
 
 const generatedToken = process.env.RELAY_TOKEN ? null : randomBytes(24).toString("base64url").slice(0, 32);
 
@@ -18,7 +13,7 @@ export const config = {
    * Falls back to Railway's injected RAILWAY_PUBLIC_DOMAIN so /connect is right on the first deploy.
    */
   publicUrl: (process.env.PUBLIC_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "")).replace(/\/+$/, ""),
-  ownerHandle: normaliseHandle(process.env.OWNER_HANDLE || "@owner"),
+  ownerHandle: ((h: string) => (h.startsWith("@") ? h : `@${h}`))((process.env.OWNER_HANDLE || "@owner").trim() || "@owner"),
   /** Agent the bare RELAY_TOKEN acts as when the caller does not say (store setting overrides). */
   ownerTokenAgent: process.env.RELAY_TOKEN_AGENT || "",
   ownerAgents: (process.env.OWNER_AGENTS || "muse,claude-code,codex,cursor")

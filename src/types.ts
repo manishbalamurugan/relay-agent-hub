@@ -91,7 +91,6 @@ export interface StoreData {
   owner: Principal;
   peers: Principal[];
   envelopes: StoredEnvelope[];
-  invites: Record<string, { handle: string; created_at: string; code: string }>;
   /** sha256(token) -> who it acts for. Minted via POST /invites. */
   tokens: Record<string, TokenRecord>;
 }

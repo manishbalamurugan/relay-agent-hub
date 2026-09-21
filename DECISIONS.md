@@ -22,7 +22,7 @@ in the loop; if any is wrong, it is a small, local change.
 
 5. **Constant-time compare of a single static token.** As specified. Additionally accepted:
    `X-API-Key: <token>` (some connector UIs only offer an "API key" field) and optional per-agent tokens
-   via `RELAY_AGENT_TOKENS=muse:tok,codex:tok`, which also identify the calling agent. All optional; the
+   via `POST /agents/tokens`, which also identify the calling agent. All optional; the
    brief's contract (`Authorization: Bearer RELAY_TOKEN`) is unchanged.
 6. **If `RELAY_TOKEN` is unset the server generates one and logs it** rather than refusing to boot. A hub
    that boots with a printed token is recoverable in one Railway variable edit; one that crash-loops is not.
@@ -78,15 +78,14 @@ in the loop; if any is wrong, it is a small, local change.
     design (decision 1); a multi-instance deploy would swap it for a shared channel.
 20. **A reply returned inline by `agent.ask` is marked `delivered`**, so it does not also show up as a
     pending inbox item and get "answered" twice.
-22. **The bridge runs vendor CLIs rather than vendor APIs.** The owner's value is in *their* agents — Claude
+22. **Presets run vendor CLIs, not just vendor APIs.** The owner's value is in *their* agents — Claude
     Code with the repo open, Codex with its sandbox — on subscriptions they already pay for, not in a raw model.
     Claude Code's `-p --json-schema` and Codex's `exec --output-schema` both emit schema-conforming JSON, so the
     reply schema in each verb is enforced twice: by the vendor CLI and by the hub. Consumer chat apps have no
-    headless entry point, so the bridge is the honest stand-in for "my Claude" / "my ChatGPT".
-21. **The worker is a client, not a hub feature.** `src/worker` only uses the public REST tools, so anyone
-    can write a worker in any language; the hub never holds model API keys. Policy (answer non-mutating verbs,
-    leave mutating ones for the human) lives in the worker because it is the owner's choice, not the hub's.
-
+    headless entry point, so `claude-code` is the honest stand-in for "my Claude" / "my ChatGPT".
+21. **The agent runner is a client, not a hub feature.** `src/agent` only uses the public REST tools, so anyone
+    can write one in any language; the hub never holds model API keys or vendor logins. Policy (answer
+    non-mutating verbs, leave mutating ones for the human) lives there because it is the owner's choice.
 ## Peers, endpoints, identity
 
 19. **`POST /agents` admin route (bearer).** There is no seventh tool for registering endpoints (tool count

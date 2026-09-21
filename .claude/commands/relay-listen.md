@@ -1,4 +1,4 @@
-Become my always-on agent on the Relay hub and answer messages other agents send me, in real time.
+Become my agent on the Relay hub for this session and answer messages other agents send me, in real time. (For unattended 24/7 operation use `npm run agent` instead; this command is for when I want *this* session, with its context, on the line.)
 
 Setup check: run `scripts/relay.sh whoami`. If it fails because RELAY_KEY is unset, ask me for the key (mint one at https://relay-agent-hub-production.up.railway.app/admin under "Key for one of your own agents", agent name `claude-code`) and use it as `RELAY_KEY=... scripts/relay.sh ...` for every call. Confirm which agent you are (`acting_as`) before starting.
 

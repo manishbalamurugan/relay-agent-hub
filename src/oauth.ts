@@ -11,15 +11,18 @@
  *   POST /token          → authorization_code (PKCE) | refresh_token
  */
 import { createHash, randomBytes } from "node:crypto";
-import { promises as fs } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import express, { type Request, type Response, type Router } from "express";
 import { checkToken } from "./auth.js";
 import { baseUrl } from "./config.js";
+import { escapeHtml as esc, page } from "./http.js";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const publicDir = path.resolve(here, "..", "public");
+const FIELDS = ["client_id", "redirect_uri", "code_challenge", "state", "scope"] as const;
+
+/** The paste-your-key consent page, carrying the authorization request through as hidden fields. */
+async function authorizePage(fields: Record<string, string | undefined>, client: string, error: string): Promise<string> {
+  const hidden = FIELDS.map(k => `<input type="hidden" name="${k}" value="${esc(fields[k] ?? "")}">`).join("\n");
+  return (await page("authorize.html", { CLIENT: client, BASE_URL: baseUrl(), ERROR: error })).replaceAll("{{HIDDEN}}", hidden);
+}
 
 interface PendingCode {
   token: string;
@@ -47,14 +50,6 @@ function safeRedirect(uri: string): boolean {
   } catch {
     return false;
   }
-}
-
-function esc(s: string): string {
-  return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
-}
-
-export function protectedResourceMetadataUrl(): string {
-  return `${baseUrl()}/.well-known/oauth-protected-resource/mcp`;
 }
 
 export function oauthRouter(): Router {
@@ -123,23 +118,8 @@ export function oauthRouter(): Router {
       res.status(400).type("html").send(`<h1>Relay sign-in</h1><p>Bad authorization request:</p><ul>${problems.map(p => `<li>${esc(p)}</li>`).join("")}</ul>`);
       return;
     }
-    let html = await fs.readFile(path.join(publicDir, "authorize.html"), "utf8");
-    const fields: Record<string, string> = {
-      client_id: q.client_id!,
-      redirect_uri,
-      code_challenge: q.code_challenge!,
-      state: q.state ?? "",
-      scope: q.scope ?? "relay"
-    };
-    const hidden = Object.entries(fields)
-      .map(([k, v]) => `<input type="hidden" name="${k}" value="${esc(v)}">`)
-      .join("\n");
-    html = html
-      .replaceAll("{{HIDDEN}}", hidden)
-      .replaceAll("{{CLIENT}}", esc(known?.name ?? (() => { try { return new URL(redirect_uri).hostname; } catch { return "an MCP client"; } })()))
-      .replaceAll("{{BASE_URL}}", esc(baseUrl()))
-      .replaceAll("{{ERROR}}", "");
-    res.type("html").send(html);
+    const client = known?.name ?? new URL(redirect_uri).hostname;
+    res.type("html").send(await authorizePage({ ...q, redirect_uri, scope: q.scope ?? "relay" }, client, ""));
   });
 
   r.post("/authorize", async (req, res) => {
@@ -152,10 +132,7 @@ export function oauthRouter(): Router {
     const key = (b.relay_key ?? "").trim().replace(/^bearer\s+/i, "");
     const caller = checkToken(key);
     if (!caller) {
-      let html = await fs.readFile(path.join(publicDir, "authorize.html"), "utf8");
-      const hidden = ["client_id", "redirect_uri", "code_challenge", "state", "scope"].map(k => `<input type="hidden" name="${k}" value="${esc(b[k] ?? "")}">`).join("\n");
-      html = html.replaceAll("{{HIDDEN}}", hidden).replaceAll("{{CLIENT}}", esc(clients.get(b.client_id)?.name ?? "the client")).replaceAll("{{BASE_URL}}", esc(baseUrl())).replaceAll("{{ERROR}}", "That key was not recognised. Check for typos or ask the hub owner for a new one.");
-      res.status(401).type("html").send(html);
+      res.status(401).type("html").send(await authorizePage(b, clients.get(b.client_id)?.name ?? "the client", "That key was not recognised. Check for typos or ask the hub owner for a new one."));
       return;
     }
     const code = `ac_${b64url(randomBytes(24))}`;

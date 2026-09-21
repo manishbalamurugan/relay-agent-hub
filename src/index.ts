@@ -1,17 +1,18 @@
 /**
  * Relay — HTTP surface and boot.
  *
- * Public (no auth):   GET /health   GET /openapi.json   GET /connect   GET /invite   GET /admin (page; API calls need the owner key)
- * Bearer-protected:   POST|GET|DELETE /mcp   POST /tools/<tool>   GET|POST|DELETE /agents
+ * Public:     GET /health  /openapi.json  /connect  /invite  /admin  /relay.css   + OAuth shim (src/oauth.ts)
+ * Bearer:     POST|GET|DELETE /mcp   POST /tools/<tool>
+ * Owner key:  invites, agent keys, endpoint registry (src/admin.ts)
  */
-import { promises as fs } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
-import { randomBytes } from "node:crypto";
-import { callerAgent, extractToken, getCaller, hashToken, requireAdmin, requireBearer } from "./auth.js";
+import { adminRouter } from "./admin.js";
+import { callerAgent, getCaller, hashToken, requireBearer } from "./auth.js";
 import { baseUrl, config } from "./config.js";
+import { normaliseHandle } from "./dispatcher.js";
+import { connectBlock, page, publicDir, wrap } from "./http.js";
 import { handleMcp, sessionCount } from "./mcp.js";
 import { buildOpenApi } from "./openapi.js";
 import { oauthRouter } from "./oauth.js";
@@ -20,83 +21,21 @@ import { store } from "./store.js";
 import { buildTools, runTool } from "./tools.js";
 import { loadTransports } from "./transports/index.js";
 import { RelayError } from "./types.js";
-import type { AgentRecord } from "./types.js";
-import { normaliseHandle } from "./dispatcher.js";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const publicDir = path.resolve(here, "..", "public");
 const startedAt = Date.now();
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
-}
-
-function claimHandle(raw: string): string {
-  const cleaned = raw.trim().toLowerCase().replace(/^@+/, "").replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
-  if (cleaned.length < 2) throw new RelayError(400, "handle must be at least 2 characters (letters, digits, . _ -)");
-  const handle = `@${cleaned}`;
-  if (handle === store.snapshot.owner.handle) throw new RelayError(400, "that is the hub owner's handle");
-  return handle;
-}
-
-/** Create/extend a peer principal and bind a token to it. Runs inside store.mutate. */
-function bindToken(d: import("./types.js").StoreData, token: string, handle: string, agents: string[], displayName: string | undefined, label: string | undefined, allowlisted: boolean): void {
-  let p = d.peers.find(x => x.handle === handle);
-  if (!p) {
-    p = { handle, agents: [], invited_at: new Date().toISOString(), allowlisted };
-    d.peers.push(p);
-  }
-  if (displayName) p.display_name = displayName;
-  p.connected_at ??= new Date().toISOString();
-  for (const name of agents) if (!p.agents.some(a => a.name === name)) p.agents.push({ name });
-  const existing = d.tokens[hashToken(token)];
-  d.tokens[hashToken(token)] = { ...(existing ?? { created_at: new Date().toISOString() }), handle, label };
-  for (const e of d.envelopes) if (e.state === "pending_invite" && e.to.handle === handle) e.state = "queued";
-}
-
-function connectBlock(token: string): string {
-  return [
-    `Connect to Relay. MCP server: ${baseUrl()}/mcp`,
-    `Auth header: Authorization: Bearer ${token}`,
-    "Ask me for the key using your secure credential prompt.",
-    "To reach someone, call agent.ask with timeout_s 60: it returns their answer inline when their agent is listening.",
-    "When I ask you to check Relay, call inbox.list with wait_s 30. If you can run recurring tasks, do that every few minutes too.",
-    "If anything needs my decision, summarise it and ask me before replying."
-  ].join("\n");
-}
-
-async function renderTemplate(file: string, vars: Record<string, string>): Promise<string> {
-  let html = await fs.readFile(path.join(publicDir, file), "utf8");
-  for (const [k, v] of Object.entries(vars)) html = html.replaceAll(`{{${k}}}`, escapeHtml(v));
-  return html;
-}
-
-function toolContext(req: Request) {
-  const c = getCaller(req);
-  return { handle: c.handle, agent: callerAgent(req), admin: c.admin };
-}
-
-function sendError(res: Response, err: unknown): void {
-  if (err instanceof RelayError) {
-    res.status(err.status).json(err.toJSON());
-    return;
-  }
-  console.error("[http] unhandled error:", err);
-  res.status(500).json({ status: 500, error: (err as Error).message ?? "internal error" });
-}
+const toolContext = (req: Request) => ({ handle: getCaller(req).handle, agent: callerAgent(req), admin: getCaller(req).admin });
+const html = (res: Response, body: string) => void res.type("html").send(body);
 
 export function createApp() {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", true);
   app.use(express.json({ limit: "1mb" }));
-  app.use((req, res, next) => {
-    res.setHeader("Cache-Control", "no-store");
-    next();
-  });
+  app.use((_req, res, next) => (res.setHeader("Cache-Control", "no-store"), next()));
 
-  // ---- public ------------------------------------------------------------------------------
+  // ---- public ----------------------------------------------------------------------------------
   app.get("/", (_req, res) => res.redirect("/connect"));
+  app.get("/relay.css", (_req, res) => res.sendFile(path.join(publicDir, "relay.css")));
   app.use(oauthRouter());
 
   app.get("/health", (_req, res) => {
@@ -112,298 +51,64 @@ export function createApp() {
     });
   });
 
-  app.get("/openapi.json", (_req, res) => {
-    res.json(buildOpenApi());
-  });
+  app.get("/openapi.json", (_req, res) => res.json(buildOpenApi()));
 
-  app.get("/connect", async (_req, res, next) => {
-    try {
-      const html = await renderTemplate("connect.html", {
-        BASE_URL: baseUrl(),
-        MCP_URL: `${baseUrl()}/mcp`,
-        OWNER: store.snapshot.owner.handle,
-        VERBS: verbNames().join(", "),
-        TOKEN_NOTE: config.tokenWasGenerated ? "(the server generated a temporary token at boot — set RELAY_TOKEN to pin one)" : ""
-      });
-      res.type("html").send(html);
-    } catch (err) {
-      next(err);
-    }
-  });
+  app.get(
+    "/connect",
+    wrap(async (_req, res) =>
+      html(
+        res,
+        await page("connect.html", {
+          BASE_URL: baseUrl(),
+          MCP_URL: `${baseUrl()}/mcp`,
+          OWNER: store.snapshot.owner.handle,
+          VERBS: verbNames().join(", "),
+          TOKEN_NOTE: config.tokenWasGenerated ? "(the server generated a temporary token at boot — set RELAY_TOKEN to pin one)" : ""
+        })
+      )
+    )
+  );
 
-  // Owner console: mint invites / agent keys from a browser. Static; the page calls the REST API with the owner key.
-  app.get("/admin", async (_req, res, next) => {
-    try {
-      res.type("html").send(await renderTemplate("admin.html", {}));
-    } catch (err) {
-      next(err);
-    }
-  });
+  // Owner console: the page is static; every action it takes calls the admin API with the owner key.
+  app.get("/admin", wrap(async (_req, res) => html(res, await page("admin.html"))));
 
-  app.get("/invite", async (req, res, next) => {
-    try {
+  // Invite page: unclaimed open invite → claim form; claimed/bound key → welcome + connect block; no key → explainer.
+  app.get(
+    "/invite",
+    wrap(async (req, res) => {
       const handle = normaliseHandle(String(req.query.h ?? "").slice(0, 120) || "@friend");
       const t = typeof req.query.t === "string" ? req.query.t : "";
       const rec = t ? store.snapshot.tokens[hashToken(t)] : undefined;
-      if (rec && !rec.revoked_at && rec.handle === "") {
-        const html = (await renderTemplate("claim.html", { BASE_URL: baseUrl(), OWNER: store.snapshot.owner.handle })).replace("{{TOKEN_JSON}}", JSON.stringify(t));
-        res.type("html").send(html);
-        return;
-      }
-      if (rec && !rec.revoked_at && rec.handle === handle) {
-        const html = await renderTemplate("joined.html", { BASE_URL: baseUrl(), MCP_URL: `${baseUrl()}/mcp`, OWNER: store.snapshot.owner.handle, HANDLE: handle, TOKEN: t, CONNECT_BLOCK: connectBlock(t) });
-        res.type("html").send(html);
-        return;
-      }
-      const html = await renderTemplate("invite.html", { BASE_URL: baseUrl(), MCP_URL: `${baseUrl()}/mcp`, OWNER: store.snapshot.owner.handle, HANDLE: handle, REPO_URL: config.repoUrl });
-      res.type("html").send(html);
-    } catch (err) {
-      next(err);
-    }
-  });
+      const common = { BASE_URL: baseUrl(), MCP_URL: `${baseUrl()}/mcp`, OWNER: store.snapshot.owner.handle, HANDLE: handle };
+      if (rec && !rec.revoked_at && rec.handle === "") return html(res, (await page("claim.html", common)).replace("{{TOKEN_JSON}}", JSON.stringify(t)));
+      if (rec && !rec.revoked_at && rec.handle === handle) return html(res, await page("joined.html", { ...common, CONNECT_BLOCK: connectBlock(t) }));
+      return html(res, await page("invite.html", { ...common, REPO_URL: config.repoUrl }));
+    })
+  );
 
-  // ---- bearer-protected --------------------------------------------------------------------
+  // ---- bearer ----------------------------------------------------------------------------------
   app.all("/mcp", requireBearer, async (req, res, next) => {
     try {
-      // Be forgiving to minimal clients: the SDK insists on both media types in Accept.
+      // The SDK insists on both media types in Accept; be forgiving to minimal clients.
       const accept = req.headers.accept ?? "";
-      if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
-        req.headers.accept = "application/json, text/event-stream";
-      }
+      if (!accept.includes("application/json") || !accept.includes("text/event-stream")) req.headers.accept = "application/json, text/event-stream";
       await handleMcp(req, res, toolContext(req));
     } catch (err) {
       next(err);
     }
   });
 
-  app.post("/tools/:name", requireBearer, async (req, res, next) => {
-    try {
-      const result = await runTool(String(req.params.name), req.body ?? {}, toolContext(req));
-      res.json(result);
-    } catch (err) {
-      next(err);
-    }
-  });
+  app.post("/tools/:name", requireBearer, wrap(req => runTool(String(req.params.name), req.body ?? {}, toolContext(req))));
 
-  // Register / update how an agent can be reached. Owner agents: handle = OWNER_HANDLE.
-  // ---- invites: mint a token for another person so their agents can join this hub as @handle ----
-  app.post("/invites", requireBearer, requireAdmin, async (req, res, next) => {
-    try {
-      const b = (req.body ?? {}) as Record<string, unknown>;
-      const wantsHandle = typeof b.handle === "string" && b.handle.trim().length > 0;
-      const token = `rly_${randomBytes(24).toString("base64url")}`;
-      const label = typeof b.label === "string" ? b.label : undefined;
-      if (!wantsHandle) {
-        // Open invite: the recipient picks their own name on the invite page.
-        await store.mutate(d => {
-          d.tokens[hashToken(token)] = { handle: "", label, created_at: new Date().toISOString() };
-        });
-        const inviteUrl = `${baseUrl()}/invite?t=${encodeURIComponent(token)}`;
-        res.json({ ok: true, handle: null, token, invite_url: inviteUrl, note: "Open invite: send invite_url; the person chooses their handle and display name when they open it." });
-        return;
-      }
-      const handle = claimHandle(String(b.handle));
-      const agents = Array.isArray(b.agents) ? (b.agents as unknown[]).map(String).filter(Boolean) : ["muse"];
-      await store.mutate(d => bindToken(d, token, handle, agents, typeof b.display_name === "string" ? b.display_name : undefined, label, Boolean(b.allowlisted)));
-      const inviteUrl = `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(token)}`;
-      res.json({
-        ok: true,
-        handle,
-        token,
-        invite_url: inviteUrl,
-        connect_block: connectBlock(token),
-        note: "Send invite_url to the person (it contains their token). Their agents then call the same six tools as " + handle + "."
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
+  app.use(adminRouter());
 
-  // Public: the recipient of an open invite claims a handle. Token in body proves possession of the invite.
-  app.post("/invite/claim", async (req, res, next) => {
-    try {
-      const b = (req.body ?? {}) as Record<string, unknown>;
-      const t = String(b.t ?? "");
-      const rec = store.snapshot.tokens[hashToken(t)];
-      if (!rec || rec.revoked_at) throw new RelayError(404, "invite not found or revoked");
-      if (rec.handle) throw new RelayError(409, "invite already claimed", { handle: rec.handle });
-      const handle = claimHandle(String(b.handle ?? ""));
-      const agent = String(b.agent ?? "muse").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 40) || "muse";
-      const displayName = typeof b.display_name === "string" ? b.display_name.trim().slice(0, 80) : undefined;
-      await store.mutate(d => bindToken(d, t, handle, [agent], displayName, rec.label, false));
-      res.json({ ok: true, handle, next: `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(t)}` });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Rotate the caller's key: new token issued, the presented one revoked.
-  app.post("/me/rotate", requireBearer, async (req, res, next) => {
-    try {
-      const caller = getCaller(req);
-      if (caller.admin) throw new RelayError(400, "the owner key is RELAY_TOKEN; rotate it in Railway variables");
-      const presented = extractToken(req)!;
-      const token = `rly_${randomBytes(24).toString("base64url")}`;
-      await store.mutate(d => {
-        const old = d.tokens[hashToken(presented)];
-        if (old) old.revoked_at = new Date().toISOString();
-        d.tokens[hashToken(token)] = { handle: caller.handle, agent: caller.agent, label: old?.label, created_at: new Date().toISOString() };
-      });
-      res.json({ ok: true, handle: caller.handle, token, connect_block: connectBlock(token), invite_url: `${baseUrl()}/invite?h=${encodeURIComponent(caller.handle)}&t=${encodeURIComponent(token)}` });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Owner: rotate a guest's key (e.g. they lost it). Returns their new invite link.
-  app.post("/invites/:handle/rotate", requireBearer, requireAdmin, async (req, res, next) => {
-    try {
-      const handle = normaliseHandle(String(req.params.handle));
-      if (!store.findPrincipal(handle) || handle === store.snapshot.owner.handle) throw new RelayError(404, `no guest ${handle}`);
-      const token = `rly_${randomBytes(24).toString("base64url")}`;
-      await store.mutate(d => {
-        for (const t of Object.values(d.tokens)) if (t.handle === handle && !t.revoked_at) t.revoked_at = new Date().toISOString();
-        d.tokens[hashToken(token)] = { handle, created_at: new Date().toISOString(), label: "rotated by owner" };
-      });
-      res.json({ ok: true, handle, token, invite_url: `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(token)}`, connect_block: connectBlock(token) });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Any authenticated principal can update its own profile.
-  app.post("/me", requireBearer, async (req, res, next) => {
-    try {
-      const b = (req.body ?? {}) as Record<string, unknown>;
-      const caller = getCaller(req);
-      const out = await store.mutate(d => {
-        const p = d.owner.handle === caller.handle ? d.owner : d.peers.find(x => x.handle === caller.handle);
-        if (!p) throw new RelayError(404, "principal not found");
-        if (typeof b.display_name === "string") p.display_name = b.display_name.trim().slice(0, 80) || undefined;
-        if (typeof b.default_agent === "string") {
-          const name = b.default_agent.trim().toLowerCase().slice(0, 40);
-          p.default_agent = name || undefined;
-          if (name && !p.agents.some(a => a.name === name)) p.agents.push({ name });
-        }
-        if (Array.isArray(b.agents)) {
-          for (const name of (b.agents as unknown[]).map(String).filter(Boolean)) if (!p.agents.some(a => a.name === name)) p.agents.push({ name });
-        }
-        return { handle: p.handle, display_name: p.display_name ?? null, default_agent: p.default_agent ?? null, agents: p.agents.map(a => a.name) };
-      });
-      res.json({ ok: true, ...out });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  // Owner: mint a key for one of *your own* agents (chatgpt, claude, grok…). It acts as @owner/<agent>,
-  // sees the owner inbox (defaulting to messages for that agent), and cannot administer the hub.
-  app.post("/agents/tokens", requireBearer, requireAdmin, async (req, res, next) => {
-    try {
-      const b = (req.body ?? {}) as Record<string, unknown>;
-      const agent = String(b.agent ?? "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 40);
-      if (agent.length < 2) throw new RelayError(400, "agent name is required, e.g. chatgpt");
-      const token = `rly_${randomBytes(24).toString("base64url")}`;
-      await store.mutate(d => {
-        if (!d.owner.agents.some(a => a.name === agent)) d.owner.agents.push({ name: agent });
-        if (b.rotate === true) for (const t of Object.values(d.tokens)) if (t.handle === d.owner.handle && t.agent === agent && !t.revoked_at) t.revoked_at = new Date().toISOString();
-        d.tokens[hashToken(token)] = { handle: d.owner.handle, agent, label: typeof b.label === "string" ? b.label : `owner agent ${agent}`, created_at: new Date().toISOString() };
-      });
-      res.json({ ok: true, handle: store.snapshot.owner.handle, agent, token, connect_block: connectBlock(token) });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.get("/invites", requireBearer, requireAdmin, (_req, res) => {
-    const list = Object.values(store.snapshot.tokens).map(t => ({ ...t }));
-    res.json({ tokens: list });
-  });
-
-  app.delete("/invites/:handle", requireBearer, requireAdmin, async (req, res, next) => {
-    try {
-      const handle = normaliseHandle(String(req.params.handle));
-      const n = await store.mutate(d => {
-        let count = 0;
-        for (const t of Object.values(d.tokens)) if (t.handle === handle && !t.revoked_at) (t.revoked_at = new Date().toISOString()), count++;
-        return count;
-      });
-      res.json({ ok: true, revoked: n });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.get("/agents", requireBearer, requireAdmin, (_req, res) => {
-    const d = store.snapshot;
-    const redact = (a: AgentRecord) => ({ ...a, token: a.token ? "***" : undefined });
-    res.json({ owner: { ...d.owner, agents: d.owner.agents.map(redact) }, peers: d.peers.map(p => ({ ...p, agents: p.agents.map(redact) })) });
-  });
-
-  app.post("/agents", requireBearer, requireAdmin, async (req, res, next) => {
-    try {
-      const b = (req.body ?? {}) as Record<string, unknown>;
-      const handle = normaliseHandle(String(b.handle ?? store.snapshot.owner.handle));
-      const name = String(b.agent ?? "").trim();
-      if (!name) throw new RelayError(400, "agent (name) is required");
-      if (b.endpoint_url !== undefined && b.endpoint_url !== null && !/^https?:\/\//i.test(String(b.endpoint_url))) {
-        throw new RelayError(400, "endpoint_url must be http(s)");
-      }
-      const record = await store.mutate(d => {
-        let principal = handle === d.owner.handle ? d.owner : d.peers.find(p => p.handle === handle);
-        if (!principal) {
-          principal = { handle, agents: [], connected_at: new Date().toISOString() };
-          d.peers.push(principal);
-        }
-        if (typeof b.allowlisted === "boolean" && principal !== d.owner) principal.allowlisted = b.allowlisted;
-        let agent = principal.agents.find(a => a.name === name);
-        if (!agent) {
-          agent = { name };
-          principal.agents.push(agent);
-        }
-        for (const key of ["endpoint_url", "transport", "token", "config"] as const) {
-          if (key in b) {
-            if (b[key] === null) delete agent[key];
-            else (agent as unknown as Record<string, unknown>)[key] = b[key];
-          }
-        }
-        principal.connected_at ??= new Date().toISOString();
-        // Anything parked for this handle can now flow.
-        for (const e of d.envelopes) if (e.state === "pending_invite" && e.to.handle === handle) e.state = "queued";
-        return agent;
-      });
-      res.json({ ok: true, handle, agent: { ...record, token: record.token ? "***" : undefined } });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.delete("/agents/:handle/:agent", requireBearer, requireAdmin, async (req, res, next) => {
-    try {
-      const handle = normaliseHandle(String(req.params.handle));
-      const agentName = String(req.params.agent);
-      const removed = await store.mutate(d => {
-        const principal = handle === d.owner.handle ? d.owner : d.peers.find(p => p.handle === handle);
-        if (!principal) return false;
-        const before = principal.agents.length;
-        principal.agents = principal.agents.filter(a => a.name !== agentName);
-        if (principal !== d.owner && principal.agents.length === 0) d.peers = d.peers.filter(p => p !== principal);
-        return principal.agents.length !== before;
-      });
-      res.json({ ok: removed });
-    } catch (err) {
-      next(err);
-    }
-  });
-
+  // ---- errors ----------------------------------------------------------------------------------
   app.use((_req, res) => res.status(404).json({ status: 404, error: "not found", see: `${baseUrl()}/openapi.json` }));
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const anyErr = err as { type?: string; status?: number };
-    if (anyErr?.type === "entity.parse.failed") {
-      res.status(400).json({ status: 400, error: "malformed JSON body" });
-      return;
-    }
-    sendError(res, err);
+    if ((err as { type?: string })?.type === "entity.parse.failed") return void res.status(400).json({ status: 400, error: "malformed JSON body" });
+    if (err instanceof RelayError) return void res.status(err.status).json(err.toJSON());
+    console.error("[http] unhandled error:", err);
+    res.status(500).json({ status: 500, error: (err as Error).message ?? "internal error" });
   });
   return app;
 }
@@ -413,14 +118,11 @@ export async function boot() {
   await loadVerbs();
   await loadTransports();
   buildTools();
-  const app = createApp();
-  const server = app.listen(config.port, config.host, () => {
+  const server = createApp().listen(config.port, config.host, () => {
     const addr = server.address();
     const port = typeof addr === "object" && addr ? addr.port : config.port;
     console.log(`[relay] listening on ${config.host}:${port}  public=${baseUrl()}  owner=${config.ownerHandle}  data=${config.dataFile}`);
-    if (config.tokenWasGenerated) {
-      console.warn(`[relay] RELAY_TOKEN not set — generated a temporary token for this process: ${config.token}`);
-    }
+    if (config.tokenWasGenerated) console.warn(`[relay] RELAY_TOKEN not set — generated a temporary token for this process: ${config.token}`);
     if (!config.publicUrl) console.warn("[relay] PUBLIC_URL not set — /connect will advertise localhost");
     console.log(`RELAY_READY port=${port}`);
   });
