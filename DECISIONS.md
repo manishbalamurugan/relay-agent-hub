@@ -118,6 +118,11 @@ in the loop; if any is wrong, it is a small, local change.
     Unclaimed tokens never authenticate; a claim is once-only (409 afterwards). Handles are normalised to
     `@[a-z0-9._-]{2,40}`; `display_name` is free text shown as `person` next to agents.
 
+31. **Lenient credential parsing and diagnostic 401s.** Connector UIs mangle keys (`Bearer Bearer x`, bare key,
+    quotes, `Token x`). The hub now normalises all of those; a 401 body reports scheme, key length and a 4-char
+    prefix — never the key — so "wrong key" vs "no header" is obvious. Rotation: `POST /me/rotate` (self) and
+    `POST /invites/:handle/rotate` (owner); the presented/previous key is revoked atomically.
+
 ## Not built (on purpose)
 
 - No UI beyond `/connect` and `/invite`, no database, no OAuth, no message signing (schema says

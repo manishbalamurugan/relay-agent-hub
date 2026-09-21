@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
 import { randomBytes } from "node:crypto";
-import { callerAgent, getCaller, hashToken, requireAdmin, requireBearer } from "./auth.js";
+import { callerAgent, extractToken, getCaller, hashToken, requireAdmin, requireBearer } from "./auth.js";
 import { baseUrl, config } from "./config.js";
 import { handleMcp, sessionCount } from "./mcp.js";
 import { buildOpenApi } from "./openapi.js";
@@ -211,6 +211,40 @@ export function createApp() {
       const displayName = typeof b.display_name === "string" ? b.display_name.trim().slice(0, 80) : undefined;
       await store.mutate(d => bindToken(d, t, handle, [agent], displayName, rec.label, false));
       res.json({ ok: true, handle, next: `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(t)}` });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Rotate the caller's key: new token issued, the presented one revoked.
+  app.post("/me/rotate", requireBearer, async (req, res, next) => {
+    try {
+      const caller = getCaller(req);
+      if (caller.admin) throw new RelayError(400, "the owner key is RELAY_TOKEN; rotate it in Railway variables");
+      const presented = extractToken(req)!;
+      const token = `rly_${randomBytes(24).toString("base64url")}`;
+      await store.mutate(d => {
+        const old = d.tokens[hashToken(presented)];
+        if (old) old.revoked_at = new Date().toISOString();
+        d.tokens[hashToken(token)] = { handle: caller.handle, agent: caller.agent, label: old?.label, created_at: new Date().toISOString() };
+      });
+      res.json({ ok: true, handle: caller.handle, token, connect_block: connectBlock(token), invite_url: `${baseUrl()}/invite?h=${encodeURIComponent(caller.handle)}&t=${encodeURIComponent(token)}` });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Owner: rotate a guest's key (e.g. they lost it). Returns their new invite link.
+  app.post("/invites/:handle/rotate", requireBearer, requireAdmin, async (req, res, next) => {
+    try {
+      const handle = normaliseHandle(String(req.params.handle));
+      if (!store.findPrincipal(handle) || handle === store.snapshot.owner.handle) throw new RelayError(404, `no guest ${handle}`);
+      const token = `rly_${randomBytes(24).toString("base64url")}`;
+      await store.mutate(d => {
+        for (const t of Object.values(d.tokens)) if (t.handle === handle && !t.revoked_at) t.revoked_at = new Date().toISOString();
+        d.tokens[hashToken(token)] = { handle, created_at: new Date().toISOString(), label: "rotated by owner" };
+      });
+      res.json({ ok: true, handle, token, invite_url: `${baseUrl()}/invite?h=${encodeURIComponent(handle)}&t=${encodeURIComponent(token)}`, connect_block: connectBlock(token) });
     } catch (err) {
       next(err);
     }

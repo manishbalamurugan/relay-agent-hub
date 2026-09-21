@@ -514,6 +514,26 @@ try {
       expect(ownerList.data.people.some((p: any) => p.handle === "@alex-rivera" && p.person === "Alex Rivera"), "display name not shown to others");
       const me = await fetch(`${base}/me`, { method: "POST", headers: { Authorization: `Bearer ${open.token}`, "content-type": "application/json" }, body: JSON.stringify({ display_name: "Alex" }) });
       expect(me.status === 200 && ((await me.json()) as any).display_name === "Alex", "/me update failed");
+      // Lenient credential parsing: doubled scheme, bare key, quotes all work; garbage still 401 with a diagnostic.
+      for (const h of [`Bearer Bearer ${open.token}`, open.token, `"${open.token}"`, `Token ${open.token}`]) {
+        const r = await fetch(`${base}/tools/identity.whoami`, { method: "POST", headers: { Authorization: h, "content-type": "application/json" }, body: "{}" });
+        expect(r.status === 200, `header form ${JSON.stringify(h.slice(0, 14))} rejected: ${r.status}`);
+      }
+      const bad = await fetch(`${base}/tools/identity.whoami`, { method: "POST", headers: { Authorization: "Bearer rly_wrong", "content-type": "application/json" }, body: "{}" });
+      const badJ = (await bad.json()) as any;
+      expect(bad.status === 401 && /key length=9/.test(badJ.received) && !JSON.stringify(badJ).includes("rly_wrong"), `401 diagnostic ${JSON.stringify(badJ)}`);
+      // Self-service rotation: new key works, old key dies.
+      const rot = await fetch(`${base}/me/rotate`, { method: "POST", headers: { Authorization: `Bearer ${open.token}` } });
+      const rj = (await rot.json()) as any;
+      expect(rot.status === 200 && rj.token.startsWith("rly_") && rj.handle === "@alex-rivera", `rotate ${JSON.stringify(rj)}`);
+      const oldDead = await fetch(`${base}/tools/inbox.list`, { method: "POST", headers: { Authorization: `Bearer ${open.token}`, "content-type": "application/json" }, body: "{}" });
+      expect(oldDead.status === 401, "old key still valid after rotation");
+      const newOk = await fetch(`${base}/tools/inbox.list`, { method: "POST", headers: { Authorization: `Bearer ${rj.token}`, "content-type": "application/json" }, body: "{}" });
+      expect(newOk.status === 200, "rotated key rejected");
+      const ownerRot = await fetch(`${base}/invites/${encodeURIComponent("@alex-rivera")}/rotate`, { method: "POST", headers: authHeaders });
+      expect(ownerRot.status === 200, `owner rotate ${ownerRot.status}`);
+      const newDead = await fetch(`${base}/tools/inbox.list`, { method: "POST", headers: { Authorization: `Bearer ${rj.token}`, "content-type": "application/json" }, body: "{}" });
+      expect(newDead.status === 401, "owner rotation did not revoke guest key");
       // Revoke → 401.
       const rev = await fetch(`${base}/invites/${encodeURIComponent("@friend")}`, { method: "DELETE", headers: authHeaders });
       expect(rev.status === 200, `revoke ${rev.status}`);

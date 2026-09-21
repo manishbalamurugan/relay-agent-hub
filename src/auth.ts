@@ -34,16 +34,34 @@ export interface Caller {
   admin: boolean;
 }
 
+/** Normalise the many ways connector UIs mangle a bearer credential into just the key. */
+function cleanCredential(raw: string): string {
+  let s = raw.trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+  // "Bearer x", "bearer bearer x", "Token x", "Authorization: Bearer x"
+  s = s.replace(/^authorization\s*:\s*/i, "");
+  for (let i = 0; i < 3; i++) s = s.replace(/^(bearer|token|apikey|api-key)\s+/i, "").trim();
+  return s;
+}
+
 export function extractToken(req: Request): string | undefined {
   const header = req.header("authorization");
-  if (header) {
-    const m = /^Bearer\s+(.+)$/i.exec(header.trim());
-    if (m) return m[1].trim();
-  }
+  if (header && header.trim()) return cleanCredential(header);
   // Courtesy for connector UIs that only offer an API-key header field.
-  const apiKey = req.header("x-api-key");
-  if (apiKey) return apiKey.trim();
+  const apiKey = req.header("x-api-key") ?? req.header("x-relay-token");
+  if (apiKey && apiKey.trim()) return cleanCredential(apiKey);
   return undefined;
+}
+
+/** Safe description of what a request carried, for 401 bodies. Never includes the key. */
+export function describeCredential(req: Request): string {
+  const header = req.header("authorization");
+  if (header) {
+    const scheme = /^(\S+)\s/.exec(header.trim())?.[1] ?? "(none)";
+    const key = cleanCredential(header);
+    return `Authorization header present, scheme=${scheme}, key length=${key.length}, prefix=${key.slice(0, 4)}…`;
+  }
+  if (req.header("x-api-key")) return "X-API-Key header present";
+  return "no Authorization header";
 }
 
 export function checkToken(token: string | undefined): Caller | null {
@@ -62,7 +80,12 @@ export function requireBearer(req: Request, res: Response, next: NextFunction): 
     res
       .status(401)
       .set("WWW-Authenticate", 'Bearer realm="relay"')
-      .json({ status: 401, error: "missing or invalid bearer token", hint: "Send: Authorization: Bearer <token>" });
+      .json({
+        status: 401,
+        error: "missing or invalid bearer token",
+        received: describeCredential(req),
+        hint: "Send: Authorization: Bearer <token>. Keys look like rly_… (guests) or the RELAY_TOKEN (owner). Revoked or wiped keys also fail — rotate with POST /me/rotate or ask the owner for a new invite."
+      });
     return;
   }
   (req as Request & { caller: Caller }).caller = caller;
