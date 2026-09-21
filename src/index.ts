@@ -97,7 +97,16 @@ export function createApp() {
   app.get("/", (_req, res) => res.redirect("/connect"));
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, verbs: verbNames(), version: "0.1.0", uptime_s: Math.round((Date.now() - startedAt) / 1000), sessions: sessionCount(), public_url: baseUrl() });
+    const volume = process.env.RAILWAY_VOLUME_MOUNT_PATH ?? null;
+    res.json({
+      ok: true,
+      verbs: verbNames(),
+      version: "0.1.0",
+      uptime_s: Math.round((Date.now() - startedAt) / 1000),
+      sessions: sessionCount(),
+      public_url: baseUrl(),
+      store: { file: config.dataFile, volume, persistent: Boolean(volume && path.resolve(config.dataFile).startsWith(path.resolve(volume))) }
+    });
   });
 
   app.get("/openapi.json", (_req, res) => {
