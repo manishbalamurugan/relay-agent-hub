@@ -87,7 +87,7 @@ async function loadConfig(): Promise<Config> {
   if (raw !== null) {
     const cfg = JSON.parse(raw) as Config;
     cfg.hub = (fromEnv(cfg.hub) ?? env("RELAY_URL", "http://127.0.0.1:3000")).replace(/\/+$/, "");
-    cfg.agents = (cfg.agents ?? []).map(a => ({ ...a, key: fromEnv(a.key) ?? "", api_key: fromEnv(a.api_key), cwd: a.cwd ? expandHome(fromEnv(a.cwd)!) : undefined }));
+    cfg.agents = (cfg.agents ?? []).map(a => ({ ...a, key: fromEnv(a.key) ?? "", api_key: fromEnv(a.api_key), repo: fromEnv(a.repo), cwd: a.cwd ? expandHome(fromEnv(a.cwd)!) : undefined }));
     if (!cfg.agents.length) fail(`${file} has no agents`);
     for (const a of cfg.agents) if (!a.key) fail(`agent ${a.name}: key is empty`);
     return cfg;
