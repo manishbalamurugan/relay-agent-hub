@@ -123,7 +123,6 @@ agent) gets it inline via `agent.ask`. Presets:
 | `custom` | any command with `{prompt}` / `{schema_file}` placeholders; stdout must contain JSON | whatever it is |
 | `api` | Anthropic / OpenAI / xAI API directly (Anthropic with web search) | an API key |
 | `cursor` | launches a Cursor Cloud Agent on a repo (`api.cursor.com/v1`), waits for the run, returns its final reply; PR/branch links land in `args.links` | your Cursor plan (API key from cursor.com/dashboard/api) |
-| `artemis` | hands the task to an [ARTEMIS](https://github.com/google/artemis) host (`POST /api/run`) that drives a real Android phone over ADB, waits for the session to finish, returns what the phone did as `summary`/`answer` | ARTEMIS running on the machine the phone is plugged into (`./start.sh`, port 8000) |
 
 ```bash
 cp agents.example.json agents.json      # set cwd, presets; keys may be "$ENV_VAR" references
@@ -148,24 +147,6 @@ CLI presets additionally need `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-toke
 
 Interactive alternative: `scripts/relay.sh` is a 15-line curl client, and `/relay-listen` in a Claude Code
 session makes *that* session respond until you close it.
-
-## Give your assistant a phone (ARTEMIS)
-
-[ARTEMIS](https://github.com/google/artemis) turns a sentence into actions on a real Android phone. Relay's
-`artemis` preset makes that phone one of your agents, so an assistant with no phone-use of its own can say
-"ask my phone to…" and get the result back. Same machine the phone is plugged into:
-
-```bash
-git clone https://github.com/google/artemis && cd artemis && ./start.sh      # ADB + web console on :8000
-# in relay-agent-hub, with a key minted for agent "phone" in /admin:
-ARTEMIS_URL=http://127.0.0.1:8000 AGENT_NAME=phone RELAY_KEY=rly_… RELAY_URL=https://<hub> npm run agent
-```
-
-Then from Muse: `agent.ask @you/phone task.delegate {title: "Order my usual from Sweetgreen", detail: "…"}`
-or `question.freeform {question: "What's my battery level?"}`. Only the typed args become the goal; free-text
-notes never reach the device. `profile: "pro"` (in `agents.json`) trades speed for planning and verification.
-Front-door policy keeps the phone private to you; own-order policy means your Muse's delegations run without
-a second confirmation, so keep payments and messaging out of what you delegate until you trust the loop.
 
 ## Verbs shipped
 
