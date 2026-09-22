@@ -22,13 +22,14 @@
  * Config values starting with "$" are read from the environment ("key": "$RELAY_KEY_CODEX").
  */
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
 type Json = Record<string, unknown>;
-type Preset = "claude-code" | "codex" | "custom" | "api" | "cursor";
+type Preset = "claude-code" | "codex" | "custom" | "api" | "cursor" | "artemis";
 type Reply = { args: Json; links?: string[] };
 
 interface AgentConfig {
@@ -54,6 +55,9 @@ interface AgentConfig {
   ref?: string;
   auto_pr?: boolean;
   poll_s?: number;
+  /** artemis: an ARTEMIS host (google/artemis) with an Android device attached. */
+  profile?: "flash" | "pro";
+  device_serial?: string;
 }
 interface Config {
   hub: string;
@@ -93,23 +97,25 @@ async function loadConfig(): Promise<Config> {
     return cfg;
   }
   if (!env("RELAY_KEY")) fail(`no ${file} and no RELAY_KEY — configure at least one agent (see agents.example.json)`);
-  const preset = (env("AGENT_PRESET") || (env("CURSOR_API_KEY") ? "cursor" : env("LLM_API_KEY") || env("ANTHROPIC_API_KEY") || env("OPENAI_API_KEY") || env("XAI_API_KEY") ? "api" : "claude-code")) as Preset;
+  const preset = (env("AGENT_PRESET") || (env("ARTEMIS_URL") ? "artemis" : env("CURSOR_API_KEY") ? "cursor" : env("LLM_API_KEY") || env("ANTHROPIC_API_KEY") || env("OPENAI_API_KEY") || env("XAI_API_KEY") ? "api" : "claude-code")) as Preset;
   const apiKey = preset === "cursor" ? env("CURSOR_API_KEY") : env("LLM_API_KEY") || env("ANTHROPIC_API_KEY") || env("OPENAI_API_KEY") || env("XAI_API_KEY");
   return {
     hub: env("RELAY_URL", "http://127.0.0.1:3000").replace(/\/+$/, ""),
     agents: [
       {
-        name: env("AGENT_NAME", "claude-code"),
+        name: env("AGENT_NAME", preset === "artemis" ? "phone" : "claude-code"),
         key: env("RELAY_KEY"),
         preset,
         cwd: env("AGENT_CWD") ? expandHome(env("AGENT_CWD")) : undefined,
         persona: env("AGENT_PERSONA") || undefined,
         auto_decide: env("AGENT_AUTO_DECIDE") === "true",
-        timeout_s: Number(env("AGENT_TIMEOUT_S", preset === "cursor" ? "1800" : "300")) || 300,
+        timeout_s: Number(env("AGENT_TIMEOUT_S", preset === "cursor" ? "1800" : preset === "artemis" ? "900" : "300")) || 300,
         provider: (env("LLM_PROVIDER") || undefined) as AgentConfig["provider"],
         api_key: apiKey || undefined,
         model: env("LLM_MODEL") || undefined,
-        base_url: env("OPENAI_BASE_URL") || undefined,
+        base_url: env("ARTEMIS_URL") || env("OPENAI_BASE_URL") || undefined,
+        profile: (env("ARTEMIS_PROFILE") || undefined) as AgentConfig["profile"],
+        device_serial: env("ARTEMIS_DEVICE") || undefined,
         web_search: env("AGENT_WEB_SEARCH", "true") !== "false",
         repo: env("AGENT_REPO_URL") || undefined,
         ref: env("AGENT_REPO_REF") || undefined
@@ -287,9 +293,62 @@ async function viaCursor(a: AgentConfig, p: { system: string; user: string }): P
   }
 }
 
-async function produce(a: AgentConfig, p: { system: string; user: string }, schema: Json): Promise<Reply> {
+/**
+ * ARTEMIS (github.com/google/artemis): natural language → real Android phone. The runner is the bridge between
+ * Relay and the ARTEMIS host on the machine the phone is plugged into. Only the typed args become the goal; the
+ * free-text note never reaches the phone.
+ */
+function phoneGoal(m: any): string {
+  const a = (m.args ?? {}) as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : "");
+  if (m.verb === "task.delegate") return [str(a.title), str(a.detail)].filter(Boolean).join("\n");
+  if (m.verb === "question.freeform") return [str(a.question), str(a.context) ? `Context: ${str(a.context)}` : ""].filter(Boolean).join("\n");
+  return `${m.verb}: ${JSON.stringify(a)}`;
+}
+
+async function viaArtemis(a: AgentConfig, m: any, schema: Json): Promise<Reply> {
+  const base = (a.base_url ?? "http://127.0.0.1:8000").replace(/\/$/, "");
+  const goal = phoneGoal(m);
+  if (!goal) throw new Error("empty goal");
+  const props = (schema.properties ?? {}) as Json;
+  const wantsAnswer = "answer" in props;
+  const sessionId = randomUUID();
+  const body: Json = { goal, profile: a.profile ?? "flash", session_id: sessionId, ingress: "relay" };
+  if (a.device_serial) body.device_serial = a.device_serial;
+  if (wantsAnswer && (a.profile ?? "flash") === "pro") body.expected_output = "A short factual answer to the question, based on what is on screen.";
+  const started = await fetch(`${base}/api/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+  const sj: any = await started.json().catch(() => ({}));
+  if (!started.ok || sj.status === "rejected" || (Array.isArray(sj.tasks) && sj.tasks.length === 0)) throw new Error(`artemis rejected: ${started.status} ${JSON.stringify(sj).slice(0, 300)}`);
+  const taskId: string = sj.tasks?.[0]?.session_id ?? sessionId;
+  log(a.name, `artemis task ${taskId} (${a.profile ?? "flash"}): ${goal.split("\n")[0].slice(0, 80)}`);
+  const deadline = Date.now() + (a.timeout_s ?? 900) * 1000;
+  const terminal = new Set(["completed", "success", "failed", "cancelled", "canceled", "rejected"]);
+  for (;;) {
+    await new Promise(r => setTimeout(r, (a.poll_s ?? 3) * 1000));
+    const rr = await fetch(`${base}/api/sessions/${taskId}`, { signal: AbortSignal.timeout(30_000) });
+    if (rr.status === 404) {
+      if (Date.now() > deadline) throw new Error(`artemis task ${taskId} never surfaced`);
+      continue; // still launching; not yet in session storage
+    }
+    const t: any = await rr.json();
+    const status = String(t.status ?? "unknown").toLowerCase();
+    if (terminal.has(status)) {
+      const ok = status === "completed" || status === "success";
+      const output = String(t.output ?? t.result ?? t.summary ?? "").trim();
+      const error = String(t.error ?? t.error_message ?? "").trim();
+      const link = `${base}/api/sessions/${taskId}`;
+      if (wantsAnswer) return { args: { answer: output || (ok ? "Done." : `Failed: ${error || status}`) }, links: [link] };
+      if ("accepted" in props) return { args: { accepted: ok, ...(ok ? { summary: output || "Done on the phone." } : { reason: error || `phone task ${status}` }) }, links: [link] };
+      return { args: { summary: output, status }, links: [link] };
+    }
+    if (Date.now() > deadline) throw new Error(`artemis task ${taskId} still ${status} after ${a.timeout_s ?? 900}s`);
+  }
+}
+
+async function produce(a: AgentConfig, p: { system: string; user: string }, schema: Json, m?: any): Promise<Reply> {
   if (a.preset === "api") return { args: await viaApi(a, p) };
   if (a.preset === "cursor") return viaCursor(a, p);
+  if (a.preset === "artemis") return viaArtemis(a, m, schema);
   return { args: await viaCli(a, p, schema) };
 }
 
@@ -307,10 +366,10 @@ async function handle(hub: string, a: AgentConfig, me: Identity, m: any): Promis
   const t0 = Date.now();
   // Notes strip URLs by design, so links only travel when the reply schema has a typed `links` field.
   const withLinks = (o: Reply): Json => (o.links?.length && (verb.reply_schema!.properties as Json | undefined)?.links ? { ...o.args, links: o.links } : o.args);
-  let out = await produce(a, prompt(me, a, m, verb.describe, verb.reply_schema), verb.reply_schema);
+  let out = await produce(a, prompt(me, a, m, verb.describe, verb.reply_schema), verb.reply_schema, m);
   let rep = await tool(hub, a.key, "inbox.reply", { id: m.id, args: withLinks(out) });
   if (rep.status === 400) {
-    out = await produce(a, prompt(me, a, m, verb.describe, verb.reply_schema, JSON.stringify(rep.json).slice(0, 600)), verb.reply_schema);
+    out = await produce(a, prompt(me, a, m, verb.describe, verb.reply_schema, JSON.stringify(rep.json).slice(0, 600)), verb.reply_schema, m);
     rep = await tool(hub, a.key, "inbox.reply", { id: m.id, args: withLinks(out) });
   }
   if (out.links?.length) log(a.name, `links: ${out.links.join(" · ")}`);

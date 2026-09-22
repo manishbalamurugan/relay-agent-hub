@@ -33,6 +33,14 @@
       "repo": "https://github.com/manishbalamurugan/relay-agent-hub",
       "ref": "main",
       "persona": "You are Manish's Cursor cloud agent. For tasks, implement them on a branch and summarise what you did."
+    },
+    {
+      "name": "phone",
+      "key": "$RELAY_KEY_PHONE",
+      "preset": "artemis",
+      "base_url": "http://127.0.0.1:8000",
+      "profile": "flash",
+      "timeout_s": 900
     }
   ]
 }
