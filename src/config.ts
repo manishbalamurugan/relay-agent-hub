@@ -30,8 +30,8 @@ export const config = {
   askMaxTimeoutS: 60,
   noteMaxChars: 280,
   defaultTtlMs: 24 * 60 * 60 * 1000,
-  /** Idle MCP sessions are dropped after this long without traffic. */
-  sessionIdleMs: 6 * 60 * 60 * 1000
+  /** Idle MCP sessions are dropped after this long without traffic. Polling clients open a fresh session per check. */
+  sessionIdleMs: Number(process.env.SESSION_IDLE_MIN || 20) * 60 * 1000
 };
 
 export function baseUrl(): string {
