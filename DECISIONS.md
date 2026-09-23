@@ -105,7 +105,8 @@ in the loop; if any is wrong, it is a small, local change.
     sender's front door (else 403 telling it to answer its own Muse), a cross-principal `to.agent` must be `*`
     or the recipient's front door (else 403), and `*` is rewritten to the front door so it lands in exactly one
     inbox. Peers only see each other's front door in `identity.whoami`/`agent.list`. Same-principal traffic is
-    unrestricted, which is what lets a Muse fan out to Claude Code/Codex/Cursor. Rationale: your private agents
+    unrestricted, which is what lets a Muse fan out to Claude Code/Codex/Cursor. `@me` with no agent also
+    resolves to my front door, otherwise every runner I have listening would answer the same message. Rationale: your private agents
     hold your repos and calendars; another person's assistant negotiating with them directly would bypass the
     one place you exercise judgement.
 21. **Peer protocol for `mcp-client`:** call `relay.receive` with `{envelope}` and read JSON back; or

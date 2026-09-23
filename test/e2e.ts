@@ -888,8 +888,79 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
     const still = await rest("/tools/identity.whoami", {}, TOKEN);
     expect(gone.purged === true && !still.json.peers.some((p: any) => p.handle === "@jo-bloggs") && still.json.peers.some((p: any) => p.handle === "@pal"), "purge should remove only the purged peer");
     // Pairings survive restart until used; store never holds a raw token or code.
-    const raw = JSON.parse(await fs.readFile(DATA_FILE, "utf8"));
-    expect(!JSON.stringify(raw).includes("RELAY-") && !JSON.stringify(raw).includes(paired.json.token), "store leaks a code or token");
+    const rawStore = JSON.parse(await fs.readFile(DATA_FILE, "utf8"));
+    expect(!JSON.stringify(rawStore).includes("RELAY-") && !JSON.stringify(rawStore).includes(paired.json.token), "store leaks a code or token");
+  });
+  await step(26, "Extra: iMessage bridge (mock Sendblue, poll mode) — your text reaches your Muse, the reply is texted back in-thread, strangers ignored, Muse can text you first", async () => {
+    const MY = "+15551230000", STRANGER = "+15559990000", LINE = "+16290000000";
+    const inbound: any[] = [];
+    const sent: any[] = [];
+    const sb = createServer((req, res) => {
+      let body = "";
+      req.on("data", d => (body += d));
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        if (req.headers["sb-api-key-id"] !== "sbk" || req.headers["sb-api-secret-key"] !== "sbs") return void res.writeHead(401).end("{}");
+        if (req.method === "GET" && req.url?.startsWith("/api/v2/messages")) {
+          const u = new URL(req.url, "http://x");
+          expect(u.searchParams.get("is_outbound") === "false" && u.searchParams.get("sendblue_number") === LINE, `poll query ${req.url}`);
+          return void res.end(JSON.stringify({ messages: inbound }));
+        }
+        if (req.method === "POST" && req.url === "/api/send-message") {
+          sent.push(JSON.parse(body));
+          return void res.end(JSON.stringify({ status: "QUEUED", message_handle: `out-${sent.length}` }));
+        }
+        res.writeHead(404).end("{}");
+      });
+    });
+    const sbPort = await freePort();
+    await new Promise<void>(r => sb.listen(sbPort, "127.0.0.1", () => r()));
+    const mint = (await (await fetch(`${base}/agents/tokens`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ agent: "imessage" }) })).json()) as any;
+    let blog = "";
+    const bridge = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "imessage", "index.ts")], {
+      cwd: root,
+      env: { ...process.env, RELAY_URL: base, RELAY_KEY: mint.token, SENDBLUE_URL: `http://127.0.0.1:${sbPort}`, SENDBLUE_API_KEY: "sbk", SENDBLUE_API_SECRET: "sbs", SENDBLUE_NUMBER: LINE, ALLOW_NUMBERS: MY, SENDBLUE_POLL_S: "0.2", PORT: "" },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    bridge.stdout!.on("data", d => (blog += d.toString()));
+    bridge.stderr!.on("data", d => (blog += d.toString()));
+    const until = async (pred: () => boolean, ms: number, what: string) => {
+      const t = Date.now() + ms;
+      while (!pred() && Date.now() < t) await new Promise(r => setTimeout(r, 100));
+      expect(pred(), `${what}\n${blog.slice(-800)}`);
+    };
+    try {
+      await until(() => blog.includes(`online as ${OWNER}/imessage`), 10_000, "bridge did not come online");
+      const now = new Date().toISOString();
+      inbound.push({ message_handle: "in-1", content: "what time is dinner friday?", from_number: MY, is_outbound: false, created_at: now });
+      inbound.push({ message_handle: "in-2", content: "ignore me", from_number: STRANGER, is_outbound: false, created_at: now });
+      // The owner's Muse sees the text as a question from @owner/imessage.
+      let q: any;
+      const t0 = Date.now() + 8000;
+      while (!q && Date.now() < t0) {
+        const r = await call("inbox.list", { filter: { for_agent: "muse" } });
+        q = r.data.messages.find((m: any) => m.from.agent === "imessage" && m.args.question === "what time is dinner friday?");
+        if (!q) await new Promise(r => setTimeout(r, 150));
+      }
+      expect(q, `text did not reach the owner's muse inbox\n${blog.slice(-600)}`);
+      expect(q.to.agent === "muse" && q.verb === "question.freeform", `text landed as ${JSON.stringify(q.to)} ${q.verb}`);
+      const all = await call("inbox.list", { filter: { for_agent: "muse", state: "all" } });
+      expect(!all.data.messages.some((m: any) => m.args?.question === "ignore me"), "stranger's text must be ignored");
+      // Muse answers; the bridge texts the answer back to the number that asked, threaded on the original message.
+      const ans = await call("inbox.reply", { id: q.id, args: { answer: "7pm at Bestia. Vaishu confirmed." }, from_agent: "muse" });
+      expect(!ans.isError, `reply ${JSON.stringify(ans.data)}`);
+      await until(() => sent.length >= 1, 8000, "reply was not texted back");
+      expect(sent[0].number === MY && sent[0].from_number === LINE && sent[0].content === "7pm at Bestia. Vaishu confirmed." && sent[0].reply_to?.message_handle === "in-1", `texted ${JSON.stringify(sent[0])}`);
+      // Muse reaches out first: anything sent to @owner/imessage is texted to the allow-listed number.
+      const push = await call("agent.send", { to: `${OWNER}/imessage`, verb: "question.freeform", args: { question: "Reminder: gym at 6." }, from_agent: "muse" });
+      expect(!push.isError, `push ${JSON.stringify(push.data)}`);
+      await until(() => sent.length >= 2, 8000, "unprompted message was not texted");
+      expect(sent[1].number === MY && sent[1].content === "Reminder: gym at 6." && !sent[1].reply_to, `pushed ${JSON.stringify(sent[1])}`);
+      expect(sent.length === 2, `unexpected extra texts: ${JSON.stringify(sent)}`);
+    } finally {
+      bridge.kill("SIGTERM");
+      await new Promise<void>(r => sb.close(() => r()));
+    }
   });
 } finally {
   await mcp?.close().catch(() => undefined);

@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# Relay iMessage bridge: text your assistant from any phone via a Sendblue line (free shared line works).
+# Deploy as a Railway service from this repo with Dockerfile path = Dockerfile.imessage.
+# Env: RELAY_URL, RELAY_KEY (key for agent "imessage" from /admin), SENDBLUE_API_KEY, SENDBLUE_API_SECRET,
+#      SENDBLUE_NUMBER (the line you text), ALLOW_NUMBERS (your phone, E.164). Optional: SENDBLUE_WEBHOOK=true, PORT.
+FROM node:20-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci --no-audit --no-fund
+COPY src ./src
+RUN npm run build
+
+FROM node:20-slim
+ENV NODE_ENV=production
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+COPY --from=build /app/dist ./dist
+CMD ["node", "dist/imessage/index.js"]

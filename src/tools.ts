@@ -68,7 +68,11 @@ export function buildTools(): ToolDef[] {
    * Cursor… are private to you and cannot be addressed by, or address, anyone else. Same-person traffic is free.
    */
   function gate(from: Party, to: Party): Party {
-    if (from.handle === to.handle) return to;
+    if (from.handle === to.handle) {
+      // "@me" with no agent means my front door, not every runner I have listening.
+      const door = to.agent === "*" ? store.frontDoor(to.handle) : undefined;
+      return door ? { handle: to.handle, agent: door } : to;
+    }
     const mine = store.frontDoor(from.handle);
     if (mine && from.agent !== mine) {
       throw new RelayError(403, `${from.agent} is private to ${from.handle}; only ${from.handle}/${mine} talks to other people. Answer ${from.handle}/${mine} and let it relay.`, {
