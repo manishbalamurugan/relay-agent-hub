@@ -11,8 +11,8 @@
     "agent:dev": "tsx src/agent/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "imessage": "node dist/imessage/index.js",
-    "imessage:dev": "tsx src/imessage/index.ts"
+    "imessage": "node dist/imessage/main.js",
+    "imessage:dev": "tsx src/imessage/main.ts"
   },
   "license": "MIT",
   "type": "module",

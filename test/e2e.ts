@@ -66,13 +66,14 @@ let port = 0;
 let base = "";
 let serverLog = "";
 
+let extraServerEnv: Record<string, string> = {};
 async function startServer(): Promise<void> {
   port = await freePort();
   base = `http://127.0.0.1:${port}`;
   serverLog = "";
   child = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "index.ts")], {
     cwd: root,
-    env: { ...process.env, PORT: String(port), RELAY_TOKEN: TOKEN, OWNER_HANDLE: OWNER, OWNER_AGENTS: "muse,claude-code,codex,cursor", DATA_FILE, PUBLIC_URL: base, NOTIFY_WEBHOOK_URL: "" },
+    env: { ...process.env, PORT: String(port), RELAY_TOKEN: TOKEN, OWNER_HANDLE: OWNER, OWNER_AGENTS: "muse,claude-code,codex,cursor", DATA_FILE, PUBLIC_URL: base, NOTIFY_WEBHOOK_URL: "", ...extraServerEnv },
     stdio: ["ignore", "pipe", "pipe"]
   });
   child.stdout!.on("data", d => (serverLog += d.toString()));
@@ -917,7 +918,7 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
     await new Promise<void>(r => sb.listen(sbPort, "127.0.0.1", () => r()));
     const mint = (await (await fetch(`${base}/agents/tokens`, { method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" }, body: JSON.stringify({ agent: "imessage" }) })).json()) as any;
     let blog = "";
-    const bridge = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "imessage", "index.ts")], {
+    const bridge = spawn(process.execPath, [path.join(root, "node_modules", "tsx", "dist", "cli.mjs"), path.join(root, "src", "imessage", "main.ts")], {
       cwd: root,
       env: { ...process.env, RELAY_URL: base, RELAY_KEY: mint.token, SENDBLUE_URL: `http://127.0.0.1:${sbPort}`, SENDBLUE_API_KEY: "sbk", SENDBLUE_API_SECRET: "sbs", SENDBLUE_NUMBER: LINE, ALLOW_NUMBERS: MY, SENDBLUE_POLL_S: "0.2", PORT: "" },
       stdio: ["ignore", "pipe", "pipe"]
@@ -959,6 +960,38 @@ printf '{"answer":"fake codex: %s"}' "$q" > "$last"; echo "progress..." >&2; cat
       expect(sent.length === 2, `unexpected extra texts: ${JSON.stringify(sent)}`);
     } finally {
       bridge.kill("SIGTERM");
+    }
+    // In-process mode: the hub itself runs the bridge when SENDBLUE_* env is set — one service, no key to mint.
+    await mcp.close().catch(() => undefined);
+    extraServerEnv = { SENDBLUE_URL: `http://127.0.0.1:${sbPort}`, SENDBLUE_API_KEY: "sbk", SENDBLUE_API_SECRET: "sbs", SENDBLUE_NUMBER: LINE, ALLOW_NUMBERS: MY, SENDBLUE_POLL_S: "0.2" };
+    try {
+      await restartServer();
+      mcp = await connectMcp();
+      await until(() => serverLog.includes(`online as ${OWNER}/imessage`), 10_000, "in-process bridge did not come online");
+      const keys = ((await (await fetch(`${base}/invites`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json()) as any).tokens.filter((t: any) => t.label === "imessage-bridge");
+      expect(keys.length === 1 && !keys[0].revoked_at && keys[0].agent === "imessage", `bridge key minted per boot: ${JSON.stringify(keys)}`);
+      inbound.length = 0;
+      inbound.push({ message_handle: "in-3", content: "did vaishu confirm?", from_number: MY, is_outbound: false, created_at: new Date().toISOString() });
+      let q2: any;
+      const t1 = Date.now() + 8000;
+      while (!q2 && Date.now() < t1) {
+        const r = await call("inbox.list", { filter: { for_agent: "muse" } });
+        q2 = r.data.messages.find((m: any) => m.args?.question === "did vaishu confirm?");
+        if (!q2) await new Promise(r => setTimeout(r, 150));
+      }
+      expect(q2, `in-process bridge did not forward the text
+${serverLog.slice(-600)}`);
+      await call("inbox.reply", { id: q2.id, args: { answer: "Yes, 7pm." }, from_agent: "muse" });
+      await until(() => sent.length >= 3, 8000, "in-process bridge did not text the reply back");
+      expect(sent[2].content === "Yes, 7pm." && sent[2].reply_to?.message_handle === "in-3", `in-process reply ${JSON.stringify(sent[2])}`);
+      // Restart again: old bridge key revoked, exactly one live.
+      await mcp.close().catch(() => undefined);
+      await restartServer();
+      mcp = await connectMcp();
+      const keys2 = ((await (await fetch(`${base}/invites`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json()) as any).tokens.filter((t: any) => t.label === "imessage-bridge");
+      expect(keys2.length === 2 && keys2.filter((t: any) => !t.revoked_at).length === 1, `bridge keys after restart: ${JSON.stringify(keys2.map((t: any) => !!t.revoked_at))}`);
+    } finally {
+      extraServerEnv = {};
       await new Promise<void>(r => sb.close(() => r()));
     }
   });

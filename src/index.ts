@@ -8,7 +8,8 @@
 import path from "node:path";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
-import { adminRouter } from "./admin.js";
+import { adminRouter, newToken } from "./admin.js";
+import { bridgeOptionsFromEnv, startBridge } from "./imessage/index.js";
 import { callerAgent, getCaller, hashToken, requireBearer } from "./auth.js";
 import { baseUrl, config } from "./config.js";
 import { normaliseHandle } from "./dispatcher.js";
@@ -137,6 +138,7 @@ export async function boot() {
     if (config.tokenWasGenerated) console.warn(`[relay] RELAY_TOKEN not set — generated a temporary token for this process: ${config.token}`);
     if (!config.publicUrl) console.warn("[relay] PUBLIC_URL not set — /connect will advertise localhost");
     console.log(`RELAY_READY port=${port}`);
+    void startImessageBridge(port);
   });
   const shutdown = (sig: string) => {
     console.log(`[relay] ${sig} received, shutting down`);
@@ -146,6 +148,29 @@ export async function boot() {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   return server;
+}
+
+/**
+ * If SENDBLUE_* env is set, run the iMessage bridge inside the hub against localhost: one Railway service,
+ * four env vars, no key handling. The bridge's key is minted per boot (label "imessage-bridge"), never stored in clear.
+ */
+async function startImessageBridge(port: number): Promise<void> {
+  let opts;
+  try {
+    opts = bridgeOptionsFromEnv(`http://127.0.0.1:${port}`, "");
+  } catch (err) {
+    return console.error(`[imessage] not started: ${(err as Error).message}`);
+  }
+  if (!opts) return;
+  const label = "imessage-bridge";
+  const key = newToken(); // lives only in this process; the previous boot's key is revoked so nothing accumulates
+  await store.mutate(d => {
+    const now = new Date().toISOString();
+    for (const t of Object.values(d.tokens)) if (t.label === label && !t.revoked_at) t.revoked_at = now;
+    d.tokens[hashToken(key)] = { handle: d.owner.handle, agent: "imessage", label, created_at: now };
+    if (!d.owner.agents.some(a => a.name === "imessage")) d.owner.agents.push({ name: "imessage" });
+  });
+  startBridge({ ...opts, key }).catch(err => console.error(`[imessage] ${(err as Error).message}`));
 }
 
 boot().catch(err => {
