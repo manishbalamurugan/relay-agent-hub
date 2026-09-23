@@ -148,23 +148,22 @@ CLI presets additionally need `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-toke
 Interactive alternative: `scripts/relay.sh` is a 15-line curl client, and `/relay-listen` in a Claude Code
 session makes *that* session respond until you close it.
 
-## Text your assistant over iMessage (`npm run imessage`)
+## Text your assistant over iMessage
 
-A small bridge makes a phone number one of your agents (`@you/imessage`). Texts from your number go to your
-front door as `question.freeform`; every reply is texted back in-thread; anything your assistant sends to
-`@you/imessage` unprompted is texted to you, so it can reach you first. No Mac, no webhook, no cost on
-[Sendblue](https://sendblue.com)'s free shared line: inbound is polled from `GET /api/v2/messages` and replies
-to a verified contact are allowed.
+Texts from your phone go to your front door (Muse) as `question.freeform`, replies come back as blue bubbles
+in-thread, and anything your assistant sends to `@you/imessage` is texted to you, so it can reach you first.
+Uses [Sendblue](https://sendblue.com)'s free shared line: inbound is polled (no webhooks), replies go to
+verified contacts. No Mac, no second service: set these on the hub and redeploy.
 
-1. Create a free Sendblue account (dashboard works from a phone), note the shared line's number and your API
-   key + secret, add your phone as a verified contact, and text the line once.
-2. In `/admin`, mint a key for agent `imessage`.
-3. Deploy `Dockerfile.imessage` as a Railway service (or run locally) with `RELAY_URL`, `RELAY_KEY`,
-   `SENDBLUE_API_KEY`, `SENDBLUE_API_SECRET`, `SENDBLUE_NUMBER`, `ALLOW_NUMBERS=+1yourphone`.
-4. Tell your assistant once: "Questions from @you/imessage are me texting you; answer them directly."
+| Variable | Value |
+|---|---|
+| `SENDBLUE_API_KEY` / `SENDBLUE_API_SECRET` | from the Sendblue dashboard |
+| `SENDBLUE_NUMBER` | the shared line you text, E.164 (`+1…`) |
+| `ALLOW_NUMBERS` | your phone, E.164; only these numbers can talk to your assistant |
 
-On a paid Sendblue line set `SENDBLUE_WEBHOOK=true` and point the `receive` webhook at the service URL for
-push delivery instead of the 2-second poll. Only numbers in `ALLOW_NUMBERS` can talk to your assistant.
+The hub mints a key for `@you/imessage` on each boot (never stored in clear). Tell your assistant once:
+"questions from @you/imessage are me texting you; answer them directly." Standalone (`npm run imessage`,
+`Dockerfile.imessage`) and push mode (`SENDBLUE_WEBHOOK=true` on a paid line) are also supported.
 
 ## Verbs shipped
 
